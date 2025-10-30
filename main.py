@@ -124,6 +124,7 @@ class PreprocessingWorker(QObject):
             channels = self.params['channels'][:4]
             
             self.progress_updated.emit(5, "Initializing preprocessing...")
+            QApplication.processEvents() 
             
             # Get raw data
             if self.data.ndim > 1:
@@ -139,7 +140,7 @@ class PreprocessingWorker(QObject):
             target_fs = self.params['target_fs']
             
             self.progress_updated.emit(10, f"Processing {len(channels)} channels...")
-            
+            QApplication.processEvents()
             # Process each channel
             processed_channels = []
             total_channels = raw_data.shape[1]
@@ -150,18 +151,19 @@ class PreprocessingWorker(QObject):
                 
                 progress = 10 + (i * 70 // total_channels)
                 self.progress_updated.emit(progress, f"Processing channel {i+1}/{total_channels}...")
-                
+                QApplication.processEvents()
                 ch_data = raw_data[:, i]
                 
                 try:
                     processed_data = self._process_with_mne(ch_data, original_fs, target_fs, i)
                     processed_channels.append(processed_data)
-                    
+                    QApplication.processEvents()
                 except Exception as e:
                     self.error_occurred.emit(f"Error processing channel {i+1}: {str(e)}")
                     return
                 
-                QThread.msleep(10)
+                QThread.msleep(50)
+                QApplication.processEvents()
             
             if self.is_cancelled:
                 return
@@ -818,7 +820,19 @@ class OpenEphysMainWindow(QMainWindow):
     def preprocess_data(self):
         """Open preprocessing dialog - FIXED thread checking"""
         print("PREPROCESS_DATA METHOD CALLED!")
+        import sys
+        import traceback
+        from datetime import datetime
         
+        def log_error(msg):
+            try:
+                with open('app_errors.log', 'a') as f:
+                    f.write(f"[{datetime.now()}] {msg}\n")
+            except:
+                pass
+        
+        log_error("Preprocess data method called")
+
         if self.current_data is None:
             QMessageBox.warning(self, "No Data", "Please load data first.")
             return
@@ -834,6 +848,37 @@ class OpenEphysMainWindow(QMainWindow):
             # Thread object was deleted, safe to continue
             self.worker_thread = None
         
+        # ============================================================================
+        # CLEANUP CODE - RIGHT AFTER THREAD CHECK, BEFORE DIALOG
+        # ============================================================================
+        
+        # CRITICAL FIX: Clean up old comparison view widgets (but keep the page)
+        if hasattr(self, 'comparison_page') and self.comparison_page is not None:
+            # Clear the plot
+            if hasattr(self, 'comparison_plot_widget') and self.comparison_plot_widget is not None:
+                self.comparison_plot_widget.clear()
+            
+            # Remove slider widgets from layout
+            layout = self.comparison_page.layout()
+            if layout is not None:
+                widgets_to_remove = []
+                for i in range(layout.count()):
+                    item = layout.itemAt(i)
+                    if item and item.widget():
+                        widget = item.widget()
+                        # Only remove slider widgets, keep the plot
+                        if widget != self.comparison_plot_widget:
+                            from PyQt5.QtWidgets import QSlider
+                            if widget.findChildren(QSlider):
+                                widgets_to_remove.append(widget)
+                
+                for widget in widgets_to_remove:
+                    layout.removeWidget(widget)
+                    widget.deleteLater()
+            
+            print("✓ Cleared old slider widgets from comparison view")
+        
+        
         try:
             from dialogs import PreprocessingDialog
             
@@ -844,6 +889,7 @@ class OpenEphysMainWindow(QMainWindow):
                     channel_name = os.path.splitext(os.path.basename(file_path))[0]
                     self.current_header['channel_files'] = [f"{channel_name}.continuous"]
                     self.current_header['channel_count'] = 1
+            
             dialog = PreprocessingDialog(
                 self.current_data, 
                 self.current_header, 
@@ -859,6 +905,8 @@ class OpenEphysMainWindow(QMainWindow):
                     QMessageBox.warning(self, "No Channels", "Please select at least one channel to process.")
                     
         except Exception as e:
+            error_msg = f"Failed to open preprocessing dialog: {str(e)}\n{traceback.format_exc()}"
+            log_error(error_msg)
             QMessageBox.critical(self, "Error", f"Failed to open preprocessing dialog:\n{str(e)}")
 
     def start_robust_preprocessing(self, params):
@@ -876,7 +924,7 @@ class OpenEphysMainWindow(QMainWindow):
                 0, 100, 
                 self
             )
-            self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.setWindowModality(Qt.NonModal)
             self.progress_dialog.setAutoClose(False)
             self.progress_dialog.setMinimumDuration(0)
             self.progress_dialog.resize(400, 100)
@@ -1056,174 +1104,182 @@ class OpenEphysMainWindow(QMainWindow):
                           channel_names, original_fs, target_fs):
         """Create comparison view with amplitude control support"""
         
-        if not hasattr(self, 'comparison_page'):
-            self.comparison_page = QWidget()
-            layout = QVBoxLayout(self.comparison_page)
+        try:
+            QApplication.processEvents()
             
-            # Title
-            #title = QLabel("Before/After Preprocessing Comparison")
-            #title.setFont(QFont("Arial", 14, QFont.Bold))
-            #title.setAlignment(Qt.AlignCenter)
-            #layout.addWidget(title)
+            # ========== ALL YOUR CODE GOES INSIDE HERE ==========
             
-            # Create plot widget
-            self.comparison_plot_widget = pg.PlotWidget()
-            self.comparison_plot_widget.setBackground('w')
-            self.comparison_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            self.comparison_plot_widget.setLabel('bottom', 'Time (seconds)', units='')
-            self.comparison_plot_widget.setTitle("Before/After Preprocessing Comparison")
+            if not hasattr(self, 'comparison_page'):
+                self.comparison_page = QWidget()
+                layout = QVBoxLayout(self.comparison_page)
+                
+                # Create plot widget
+                self.comparison_plot_widget = pg.PlotWidget()
+                self.comparison_plot_widget.setBackground('w')
+                self.comparison_plot_widget.showGrid(x=True, y=True, alpha=0.3)
+                self.comparison_plot_widget.setLabel('bottom', 'Time (seconds)', units='')
+                self.comparison_plot_widget.setTitle("Before/After Preprocessing Comparison")
+                
+                # Performance optimizations
+                self.comparison_plot_widget.setClipToView(True)
+                self.comparison_plot_widget.setDownsampling(auto=True, mode='peak')
+                self.comparison_plot_widget.setMouseEnabled(x=True, y=True)
+                self.comparison_plot_widget.getPlotItem().setClipToView(True)
+                
+                layout.addWidget(self.comparison_plot_widget)
+                annotation_panel = QWidget()
+                annotation_layout = QVBoxLayout(annotation_panel)
+                
+                controls = AnnotationControls(self.annotation_manager, self)
+                annotation_layout.addLayout(controls)
+                
+                self.comparison_annotation_widget = AnnotationWidget(self.annotation_manager)
+                annotation_layout.addWidget(self.comparison_annotation_widget)
+                
+                layout.addWidget(annotation_panel)
+                self.content_stack.addWidget(self.comparison_page)
             
+            # Switch to comparison view
+            self.content_stack.setCurrentWidget(self.comparison_page)
+            if not hasattr(self, 'comparison_drag_annotator'):
+                self.comparison_drag_annotator = add_drag_to_mark_annotation(
+                    self.comparison_plot_widget, self.annotation_manager
+                )
+            self.comparison_plot_widget.clear()
             
-            # Performance optimizations
-            self.comparison_plot_widget.setClipToView(True)
-            self.comparison_plot_widget.setDownsampling(auto=True, mode='peak')
-            self.comparison_plot_widget.setMouseEnabled(x=True, y=True)
-            self.comparison_plot_widget.getPlotItem().setClipToView(True)
+            # Store data for controls and amplitude scaling
+            self.comparison_raw_data = raw_data
+            self.comparison_raw_timestamps = raw_timestamps
+            self.comparison_proc_data = proc_data
+            self.comparison_proc_timestamps = proc_timestamps
+            self.comparison_channel_names = channel_names
             
-            layout.addWidget(self.comparison_plot_widget)
-            annotation_panel = QWidget()
-            annotation_layout = QVBoxLayout(annotation_panel)
+            n_channels = min(len(channel_names), raw_data.shape[1], proc_data.shape[1])
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
             
-            controls = AnnotationControls(self.annotation_manager, self)
-            annotation_layout.addLayout(controls)
+            # Calculate spacing
+            all_data = np.concatenate([raw_data[:, :n_channels], proc_data[:, :n_channels]], axis=1)
+            max_range = np.max(np.ptp(all_data, axis=0))
+            self.comparison_spacing = max_range * 2
             
+            # Store base normalized data for amplitude scaling
+            self.comparison_raw_normalized = []
+            self.comparison_proc_normalized = []
+            self.comparison_raw_curves = []
+            self.comparison_proc_curves = []
             
-            self.comparison_annotation_widget = AnnotationWidget(self.annotation_manager)
-            annotation_layout.addWidget(self.comparison_annotation_widget)
+            # Plot BEFORE (top) - store curves
+            for i in range(n_channels):
+                y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
+                
+                ch_data = raw_data[:, i]
+                normalized_base = (ch_data / np.ptp(ch_data)) * self.comparison_spacing * 0.8
+                self.comparison_raw_normalized.append(normalized_base)
+                
+                normalized = normalized_base + y_offset
+                pen = pg.mkPen(color=colors[i % len(colors)], width=2)
+                
+                curve = self.comparison_plot_widget.plot(
+                    raw_timestamps, normalized, 
+                    pen=pen,
+                    antialias=False,
+                    clipToView=True,
+                    autoDownsample=True,
+                    downsampleMethod='peak'
+                )
+                self.comparison_raw_curves.append(curve)
             
-            layout.addWidget(annotation_panel)
-            self.content_stack.addWidget(self.comparison_page)
-        
-        # Switch to comparison view
-        self.content_stack.setCurrentWidget(self.comparison_page)
-        if not hasattr(self, 'comparison_drag_annotator'):
-            self.comparison_drag_annotator = add_drag_to_mark_annotation(
-                self.comparison_plot_widget, self.annotation_manager
+            # Separator
+            separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
+            pen_sep = pg.mkPen(color='gray', width=3, style=Qt.SolidLine)
+            self.comparison_separator = self.comparison_plot_widget.plot(
+                [raw_timestamps[0], raw_timestamps[-1]], 
+                [separator_y, separator_y], 
+                pen=pen_sep
             )
-        self.comparison_plot_widget.clear()
-        
-        # Store data for controls and amplitude scaling
-        self.comparison_raw_data = raw_data
-        self.comparison_raw_timestamps = raw_timestamps
-        self.comparison_proc_data = proc_data
-        self.comparison_proc_timestamps = proc_timestamps
-        self.comparison_channel_names = channel_names
-        
-        n_channels = min(len(channel_names), raw_data.shape[1], proc_data.shape[1])
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
-        
-        # Calculate spacing
-        all_data = np.concatenate([raw_data[:, :n_channels], proc_data[:, :n_channels]], axis=1)
-        max_range = np.max(np.ptp(all_data, axis=0))
-        self.comparison_spacing = max_range * 2
-        
-        # Store base normalized data for amplitude scaling
-        self.comparison_raw_normalized = []
-        self.comparison_proc_normalized = []
-        self.comparison_raw_curves = []
-        self.comparison_proc_curves = []
-        
-        # Plot BEFORE (top) - store curves
-        for i in range(n_channels):
-            y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
             
-            ch_data = raw_data[:, i]
-            # Store base normalized data
-            normalized_base = (ch_data / np.ptp(ch_data)) * self.comparison_spacing * 0.8
-            self.comparison_raw_normalized.append(normalized_base)
+            # Plot AFTER (bottom) - store curves
+            for i in range(n_channels):
+                y_offset = (n_channels - 1 - i) * self.comparison_spacing
+                
+                ch_data = proc_data[:, i]
+                normalized_base = (ch_data / np.ptp(ch_data)) * self.comparison_spacing * 0.8
+                self.comparison_proc_normalized.append(normalized_base)
+                
+                normalized = normalized_base + y_offset
+                pen = pg.mkPen(color=colors[i % len(colors)], width=2, style=Qt.SolidLine)
+                
+                curve = self.comparison_plot_widget.plot(
+                    proc_timestamps, normalized,
+                    pen=pen,
+                    antialias=False,
+                    clipToView=True,
+                    autoDownsample=True,
+                    downsampleMethod='peak'
+                )
+                self.comparison_proc_curves.append(curve)
             
-            # Apply current amplitude scale and offset
-            normalized = normalized_base + y_offset
-            
-            pen = pg.mkPen(color=colors[i % len(colors)], width=2)
-            
-            curve = self.comparison_plot_widget.plot(
-                raw_timestamps, normalized, 
-                pen=pen,
-                antialias=False,
-                clipToView=True,
-                autoDownsample=True,
-                downsampleMethod='peak'
-            )
-            self.comparison_raw_curves.append(curve)
-        
-        # Separator
-        separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
-        pen_sep = pg.mkPen(color='gray', width=3, style=Qt.SolidLine)
-        self.comparison_separator = self.comparison_plot_widget.plot(
-            [raw_timestamps[0], raw_timestamps[-1]], 
-            [separator_y, separator_y], 
-            pen=pen_sep
-        )
-        
-        # Plot AFTER (bottom) - store curves
-        for i in range(n_channels):
-            y_offset = (n_channels - 1 - i) * self.comparison_spacing
-            
-            ch_data = proc_data[:, i]
-            # Store base normalized data
-            normalized_base = (ch_data / np.ptp(ch_data)) * self.comparison_spacing * 0.8
-            self.comparison_proc_normalized.append(normalized_base)
-            
-            # Apply current amplitude scale and offset
-            normalized = normalized_base + y_offset
-            
-            pen = pg.mkPen(color=colors[i % len(colors)], width=2, style=Qt.SolidLine)
-            
-            curve = self.comparison_plot_widget.plot(
-                proc_timestamps, normalized,
-                pen=pen,
-                antialias=False,
-                clipToView=True,
-                autoDownsample=True,
-                downsampleMethod='peak'
-            )
-            self.comparison_proc_curves.append(curve)
-        
-        # Add channel name labels on Y-axis
-        y_axis = self.comparison_plot_widget.getAxis('left')
+            # Add channel name labels on Y-axis
+            y_axis = self.comparison_plot_widget.getAxis('left')
+            ticks = []
 
-        # Create labels for both sections
-        ticks = []
+            # BEFORE section (top)
+            for i in range(n_channels):
+                y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
+                ticks.append((y_offset, f"{channel_names[i]} (Before)"))
 
-        # BEFORE section (top)
-        for i in range(n_channels):
-            y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
-            ticks.append((y_offset, f"{channel_names[i]} (Before)"))
+            # Separator
+            separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
+            ticks.append((separator_y, ""))
 
-        # Separator
-        separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
-        ticks.append((separator_y, ""))
+            # AFTER section (bottom)
+            for i in range(n_channels):
+                y_offset = (n_channels - 1 - i) * self.comparison_spacing
+                ticks.append((y_offset, f"{channel_names[i]} (After)"))
 
-        # AFTER section (bottom)
-        for i in range(n_channels):
-            y_offset = (n_channels - 1 - i) * self.comparison_spacing
-            ticks.append((y_offset, f"{channel_names[i]} (After)"))
-
-        y_axis.setTicks([ticks])
-        y_axis.setLabel('')
-        y_axis.setTextPen(pg.mkPen(color='#999999')) 
-        y_axis.setPen(pg.mkPen(color='#CCCCCC', width=1))  
-        
-        x_axis = self.comparison_plot_widget.getAxis('bottom')
-        x_axis.enableAutoSIPrefix(False)
-        x_axis.setLabel('Time (seconds)', units='')
-        
-        # Set ranges
-        n_channels = len(self.comparison_raw_normalized)
-        total_height = (n_channels * 2 + 1) * self.comparison_spacing
-        self.comparison_plot_widget.setYRange(-self.comparison_spacing, total_height, padding=0.1)
-        
-        time_start = min(raw_timestamps[0], proc_timestamps[0])
-        time_end = max(raw_timestamps[-1], proc_timestamps[-1])
-        self.comparison_plot_widget.setXRange(time_start, time_end, padding=0.02)
-        
-        # Setup controls
-        self._setup_comparison_controls()
-        
-        QApplication.processEvents()
-
-        print("✓✓✓ DEBUG: create_comparison_view finished!") # ADD THIS LINE
+            y_axis.setTicks([ticks])
+            y_axis.setLabel('')
+            y_axis.setTextPen(pg.mkPen(color='#999999')) 
+            y_axis.setPen(pg.mkPen(color='#CCCCCC', width=1))  
+            
+            x_axis = self.comparison_plot_widget.getAxis('bottom')
+            x_axis.enableAutoSIPrefix(False)
+            x_axis.setLabel('Time (seconds)', units='')
+            
+            # Set ranges
+            n_channels = len(self.comparison_raw_normalized)
+            total_height = (n_channels * 2 + 1) * self.comparison_spacing
+            self.comparison_plot_widget.setYRange(-self.comparison_spacing, total_height, padding=0.1)
+            
+            time_start = min(raw_timestamps[0], proc_timestamps[0])
+            time_end = max(raw_timestamps[-1], proc_timestamps[-1])
+            self.comparison_plot_widget.setXRange(time_start, time_end, padding=0.02)
+            
+            # Setup controls
+            self._setup_comparison_controls()
+            
+            QApplication.processEvents()
+            print("DEBUG: create_comparison_view finished!")
+            
+            # ========== END OF CODE INSIDE TRY BLOCK ==========
+            
+        except Exception as e:
+            import traceback
+            from datetime import datetime
+            
+            error_msg = f"Error creating comparison view: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
+            
+            # Log to file
+            try:
+                with open('app_errors.log', 'a') as f:
+                    f.write(f"[{datetime.now()}] {error_msg}\n")
+            except:
+                pass
+            
+            QMessageBox.critical(self, "Error", 
+                f"Failed to create comparison view:\n{str(e)}\n\n"
+                "Check app_errors.log for details.")
 
     def close_dataset(self):
         """Close current dataset and allow loading new data"""
@@ -1531,9 +1587,9 @@ class OpenEphysMainWindow(QMainWindow):
         
     def _setup_comparison_controls(self):
         """Setup zoom controls for comparison view WITH amp controls"""
-        print(f"🔧 _setup_comparison_controls called!")
+        print(f" _setup_comparison_controls called!")
 
-        # ⭐ FORCEFULLY hide PlotManager's toolbar
+        # FORCEFULLY hide PlotManager's toolbar
         if hasattr(self, 'plot_manager') and hasattr(self.plot_manager, 'parent'):
             # Find and hide the zoom toolbar created by PlotManager
             for toolbar in self.findChildren(QToolBar):
@@ -1549,12 +1605,9 @@ class OpenEphysMainWindow(QMainWindow):
         
         # Remove any old comparison toolbars
         if hasattr(self, 'comparison_toolbar') and self.comparison_toolbar is not None:
-            if self.comparison_toolbar.isVisible():
-                print("  ⚠️ Comparison toolbar already exists - skipping")
-                return  # Don't create duplicate
-
-        if hasattr(self, 'comparison_toolbar'):
             self.removeToolBar(self.comparison_toolbar)
+            self.comparison_toolbar.deleteLater()
+            self.comparison_toolbar = None
         
         # Create toolbar
         toolbar = QToolBar("Comparison Controls")
