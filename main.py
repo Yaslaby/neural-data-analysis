@@ -1,6 +1,5 @@
 import sys
 import os
-import seaborn as sns
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                              QWidget, QLabel, QSplitter, QListWidget, QListWidgetItem,
