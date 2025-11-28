@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QWidget, QLabel, QSplitter, QListWidget, QListWidgetItem,
                              QTableWidget, QTableWidgetItem, QStackedWidget, 
                              QMessageBox, QFileDialog, QDialog, QProgressDialog,
-                             QToolBar, QSlider, QComboBox, QPushButton)
+                             QToolBar, QSlider, QComboBox, QPushButton, QSizePolicy)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QMutex
 from PyQt5.QtGui import QFont
 
@@ -20,10 +20,13 @@ from dialogs import (FilterDialog, ChannelSelectionDialog, RippleDetectionDialog
 
 # Import the new combined dialog
 from dialogs import MultiChannelDownsampleDialog
-
+from sleep_scoring_dialog import SleepScoringDialog
+from ripple_detection import find_ripples_karlsson
 import pyqtgraph as pg
 import numpy as np
 import traceback
+from scipy import signal
+
 
 class DownsampleWorker(QObject):
     """Worker for downsampling operations"""
@@ -262,6 +265,10 @@ class OpenEphysMainWindow(QMainWindow):
         self.setWindowTitle("Neural Data Analysis")
         self.setMinimumSize(1200, 800)
         
+        #sleep scoring dialog
+        self.sleep_scoring_data = None
+        self.sleep_scoring_items = [] 
+
         print("OpenEphysLab initialized successfully!")
     
     def create_mnelab_style_ui(self):
@@ -352,22 +359,66 @@ class OpenEphysMainWindow(QMainWindow):
         return empty_widget
     
     def create_plot_page(self):
-        """Create plot page with visualization and annotations"""
+        """Create plot page with visualization and annotations + rezizable panels"""
         plot_widget = QWidget()
-        layout = QVBoxLayout(plot_widget)
+        main_layout = QVBoxLayout(plot_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Create vertical splitter for resizable plot and annotation panels
+        self.plot_splitter = QSplitter(Qt.Vertical)
+        self.plot_splitter.setHandleWidth(5)  # Make handle visible
+        self.plot_splitter.setChildrenCollapsible(False)
+        
+        # Create container for plot + slider (top section of splitter)
+        self.plot_container = QWidget()
+        self.plot_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.plot_container_layout = QVBoxLayout(self.plot_container)
+        self.plot_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.plot_container_layout.setSpacing(0)
+        
+        # Create plot widget
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel('left', 'Amplitude', units='µV')
         self.plot_widget.setLabel('bottom', 'Time', units='s')
         self.plot_widget.setBackground('w')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        layout.addWidget(self.plot_widget)
         
-        self.setup_annotation_system(layout)
+        # Add plot to container
+        self.plot_container_layout.addWidget(self.plot_widget)
+        
+        # Add plot container to splitter FIRST
+        self.plot_splitter.addWidget(self.plot_container)
+        # Set stretch factors
+        self.plot_splitter.setStretchFactor(0, 7)  # Plot gets 70%
+        self.plot_splitter.setStretchFactor(1, 3)  # Annotations get 30%
+
+        # Style the splitter handle
+        self.plot_splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #cccccc;
+                border: 1px solid #999999;
+            }
+            QSplitter::handle:hover {
+                background-color: #1f77b4;
+            }
+            QSplitter::handle:vertical {
+                height: 5px;
+            }
+        """)
+        
+        # Setup annotation system (will add to splitter as SECOND item)
+        self.setup_annotation_system(self.plot_splitter)
+        
+        # Set initial sizes (70% plot, 30% annotations)
+        self.plot_splitter.setSizes([700, 300])
+        
+        # Add splitter to main layout
+        main_layout.addWidget(self.plot_splitter)
+        
         return plot_widget
     
-    def setup_annotation_system(self, layout):
-        """Setup annotation system with drag-to-mark capability"""
+    def setup_annotation_system(self, parent_splitter):
+        """Setup annotation system with drag-to-mark capability - FOR SPLITTER"""
         self.annotation_manager = AnnotationManager()
         self.current_time = 0.0
         
@@ -377,7 +428,9 @@ class OpenEphysMainWindow(QMainWindow):
             self.annotation_manager
         )
         
+        # Create annotation panel (will be added to splitter)
         annotation_panel = QWidget()
+        annotation_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         annotation_layout = QVBoxLayout(annotation_panel)
         
         controls = AnnotationControls(self.annotation_manager, self)
@@ -390,7 +443,8 @@ class OpenEphysMainWindow(QMainWindow):
         
         annotation_layout.addWidget(self.annotation_widget)
         
-        layout.addWidget(annotation_panel)
+        # Add annotation panel to splitter (SECOND item, below plot+slider)
+        parent_splitter.addWidget(annotation_panel)
 
     def navigate_to_annotation(self, time):
         """Navigate to specific time in the plot"""
@@ -442,7 +496,7 @@ class OpenEphysMainWindow(QMainWindow):
         self.splitter.addWidget(info_widget)
     
     def create_menus(self):
-    #"""Create simplified menu bar - File, Edit, View, Plot only"""
+        """Create simplified menu bar - File, Edit, View, Plot only"""
         menubar = self.menuBar()
         menubar.setNativeMenuBar(False)
 
@@ -475,6 +529,13 @@ class OpenEphysMainWindow(QMainWindow):
         self.actionPreprocess.triggered.connect(self.preprocess_data)
         self.actionPreprocess.setEnabled(False)
 
+        edit_menu.addSeparator()
+        
+        #sleep scoring
+        self.actionLoadSleepScoring = edit_menu.addAction('Load &Sleep Scoring...')
+        self.actionLoadSleepScoring.triggered.connect(self.load_sleep_scoring)
+        self.actionLoadSleepScoring.setEnabled(False)
+        
         edit_menu.addSeparator()
         
         self.actionChannelSelect = edit_menu.addAction('&Select Channels...')
@@ -818,7 +879,7 @@ class OpenEphysMainWindow(QMainWindow):
             self.update_info_panel()
             self.datasets_list.clearSelection()
     def preprocess_data(self):
-        """Open preprocessing dialog - FIXED thread checking"""
+        """Open preprocessing dialog - FIXED VERSION"""
         print("PREPROCESS_DATA METHOD CALLED!")
         import sys
         import traceback
@@ -848,36 +909,24 @@ class OpenEphysMainWindow(QMainWindow):
             # Thread object was deleted, safe to continue
             self.worker_thread = None
         
-        # ============================================================================
-        # CLEANUP CODE - RIGHT AFTER THREAD CHECK, BEFORE DIALOG
-        # ============================================================================
+        # ==================================================================
+        # IMPROVED CLEANUP: Only clear plot and remove slider, keep the page structure
+        # ==================================================================
+        if hasattr(self, 'comparison_plot_widget') and self.comparison_plot_widget is not None:
+            # Clear the plot contents
+            self.comparison_plot_widget.clear()
+            print("✓ Cleared comparison plot")
         
-        # CRITICAL FIX: Clean up old comparison view widgets (but keep the page)
-        if hasattr(self, 'comparison_page') and self.comparison_page is not None:
-            # Clear the plot
-            if hasattr(self, 'comparison_plot_widget') and self.comparison_plot_widget is not None:
-                self.comparison_plot_widget.clear()
-            
-            # Remove slider widgets from layout
-            layout = self.comparison_page.layout()
-            if layout is not None:
-                widgets_to_remove = []
-                for i in range(layout.count()):
-                    item = layout.itemAt(i)
-                    if item and item.widget():
-                        widget = item.widget()
-                        # Only remove slider widgets, keep the plot
-                        if widget != self.comparison_plot_widget:
-                            from PyQt5.QtWidgets import QSlider
-                            if widget.findChildren(QSlider):
-                                widgets_to_remove.append(widget)
-                
-                for widget in widgets_to_remove:
-                    layout.removeWidget(widget)
-                    widget.deleteLater()
-            
-            print("✓ Cleared old slider widgets from comparison view")
-        
+        # Remove existing slider if present
+        if hasattr(self, 'comparison_slider_widget') and self.comparison_slider_widget is not None:
+            try:
+                if hasattr(self, 'comparison_plot_slider_layout'):
+                    self.comparison_plot_slider_layout.removeWidget(self.comparison_slider_widget)
+                self.comparison_slider_widget.deleteLater()
+                self.comparison_slider_widget = None
+                print("✓ Removed old slider")
+            except Exception as e:
+                print(f"Warning: Could not remove slider: {e}")
         
         try:
             from dialogs import PreprocessingDialog
@@ -908,7 +957,7 @@ class OpenEphysMainWindow(QMainWindow):
             error_msg = f"Failed to open preprocessing dialog: {str(e)}\n{traceback.format_exc()}"
             log_error(error_msg)
             QMessageBox.critical(self, "Error", f"Failed to open preprocessing dialog:\n{str(e)}")
-
+            
     def start_robust_preprocessing(self, params):
         """Start preprocessing with comparison view output"""
         try:
@@ -974,7 +1023,8 @@ class OpenEphysMainWindow(QMainWindow):
             print(f"Raw data shape: {raw_data.shape}")
             print(f"Processed data shape: {proc_data.shape}")
             print(f"About to create comparison view...")
-            
+    
+        
             # Close progress dialog
             if self.progress_dialog:
                 self.progress_dialog.close()
@@ -984,11 +1034,28 @@ class OpenEphysMainWindow(QMainWindow):
             real_channel_names = self.get_real_channel_names(len(channel_names))
             print(f"Real channel names: {real_channel_names}")
             
+            # Calculate threshold using Karlsson & Frank method
+            thresholds = []
+            for i in range(proc_data.shape[1]):
+                ch_data = proc_data[:, i]
+                
+                results = find_ripples_karlsson(
+                    ch_data, 
+                    fs=target_fs,
+                    min_duration=0.015,
+                    zscore_thresh=3.0,
+                    smoothing_sigma=0.004,
+                    f_plot=0
+                )
+                
+                thresholds.append(results['thresh_envelope'])
+                print(f"✓ Channel {i}: Threshold = {results['thresh_envelope']:.6f}")
+                    
             # CREATE COMPARISON VIEW - this is the key step
             print("Calling create_comparison_view...")
             self.create_comparison_view(
                 raw_data, raw_timestamps, proc_data, proc_timestamps,
-                real_channel_names, original_fs, target_fs
+                real_channel_names, original_fs, target_fs, thresholds=thresholds
             )
             print("✓ Comparison view created")
             
@@ -1101,19 +1168,25 @@ class OpenEphysMainWindow(QMainWindow):
             self.progress_dialog = None
     
     def create_comparison_view(self, raw_data, raw_timestamps, proc_data, proc_timestamps, 
-                          channel_names, original_fs, target_fs):
-        """Create comparison view with amplitude control support"""
+                      channel_names, original_fs, target_fs, thresholds=None):
+        """Create comparison view with amplitude control support - FULLY FIXED VERSION"""
+        print(f"🔍 DEBUG: create_comparison_view called")
+        print(f"🔍 DEBUG: thresholds = {thresholds}")
+        print(f"🔍 DEBUG: thresholds is None? {thresholds is None}")
+        if thresholds:
+            print(f"🔍 DEBUG: thresholds length = {len(thresholds)}")
         
         try:
             QApplication.processEvents()
             
-            # ========== ALL YOUR CODE GOES INSIDE HERE ==========
-            
             if not hasattr(self, 'comparison_page'):
                 self.comparison_page = QWidget()
-                layout = QVBoxLayout(self.comparison_page)
+                main_layout = QVBoxLayout(self.comparison_page)
+                main_layout.setContentsMargins(0, 0, 0, 0)
                 
-                # Create plot widget
+                # ==================================================================
+                # CREATE THE PLOT WIDGET FIRST (before referencing it!)
+                # ==================================================================
                 self.comparison_plot_widget = pg.PlotWidget()
                 self.comparison_plot_widget.setBackground('w')
                 self.comparison_plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -1126,8 +1199,39 @@ class OpenEphysMainWindow(QMainWindow):
                 self.comparison_plot_widget.setMouseEnabled(x=True, y=True)
                 self.comparison_plot_widget.getPlotItem().setClipToView(True)
                 
-                layout.addWidget(self.comparison_plot_widget)
+                # ==================================================================
+                # CREATE RESIZABLE SPLITTER with correct configuration
+                # ==================================================================
+                self.comparison_splitter = QSplitter(Qt.Vertical)
+                self.comparison_splitter.setHandleWidth(5)  # Make handle visible
+                self.comparison_splitter.setChildrenCollapsible(False)  # Prevent collapsing
+                
+                # ==================================================================
+                # TOP SECTION: Container for plot + slider
+                # ==================================================================
+                plot_and_slider_container = QWidget()
+                plot_and_slider_container.setSizePolicy(
+                    QSizePolicy.Expanding, 
+                    QSizePolicy.Expanding  # Allow resizing
+                )
+                plot_slider_layout = QVBoxLayout(plot_and_slider_container)
+                plot_slider_layout.setContentsMargins(0, 0, 0, 0)
+                plot_slider_layout.setSpacing(0)
+                
+                # Add plot to container
+                plot_slider_layout.addWidget(self.comparison_plot_widget)
+                
+                # Store layout reference for slider addition later
+                self.comparison_plot_slider_layout = plot_slider_layout
+                
+                # ==================================================================
+                # BOTTOM SECTION: Annotation panel
+                # ==================================================================
                 annotation_panel = QWidget()
+                annotation_panel.setSizePolicy(
+                    QSizePolicy.Expanding,
+                    QSizePolicy.Expanding  # Allow resizing
+                )
                 annotation_layout = QVBoxLayout(annotation_panel)
                 
                 controls = AnnotationControls(self.annotation_manager, self)
@@ -1136,15 +1240,49 @@ class OpenEphysMainWindow(QMainWindow):
                 self.comparison_annotation_widget = AnnotationWidget(self.annotation_manager)
                 annotation_layout.addWidget(self.comparison_annotation_widget)
                 
-                layout.addWidget(annotation_panel)
+                # ==================================================================
+                # ADD BOTH SECTIONS TO SPLITTER
+                # ==================================================================
+                self.comparison_splitter.addWidget(plot_and_slider_container)  # Top
+                self.comparison_splitter.addWidget(annotation_panel)           # Bottom
+                
+                # Set initial sizes (70% plot area, 30% annotations)
+                self.comparison_splitter.setSizes([700, 300])
+                
+                # Set stretch factors (both can resize)
+                self.comparison_splitter.setStretchFactor(0, 7)  # Top section gets 70%
+                self.comparison_splitter.setStretchFactor(1, 3)  # Bottom section gets 30%
+                
+                # Style the splitter handle to make it visible
+                self.comparison_splitter.setStyleSheet("""
+                    QSplitter::handle {
+                        background-color: #cccccc;
+                        border: 1px solid #999999;
+                    }
+                    QSplitter::handle:hover {
+                        background-color: #1f77b4;
+                    }
+                    QSplitter::handle:vertical {
+                        height: 5px;
+                    }
+                """)
+                
+                # Add splitter to main layout
+                main_layout.addWidget(self.comparison_splitter)
+                
+                # Add to content stack
                 self.content_stack.addWidget(self.comparison_page)
             
             # Switch to comparison view
             self.content_stack.setCurrentWidget(self.comparison_page)
+            
+            # Setup drag annotator if not exists
             if not hasattr(self, 'comparison_drag_annotator'):
                 self.comparison_drag_annotator = add_drag_to_mark_annotation(
                     self.comparison_plot_widget, self.annotation_manager
                 )
+            
+            # Clear existing plots
             self.comparison_plot_widget.clear()
             
             # Store data for controls and amplitude scaling
@@ -1218,7 +1356,48 @@ class OpenEphysMainWindow(QMainWindow):
                     downsampleMethod='peak'
                 )
                 self.comparison_proc_curves.append(curve)
-            
+
+            if thresholds and len(thresholds) == n_channels:
+                self.comparison_threshold_lines = []
+                self.comparison_threshold_labels = []
+                
+                for i in range(n_channels):
+                    y_offset = (n_channels - 1 - i) * self.comparison_spacing
+                    ch_data = proc_data[:, i]
+                    
+                    # Get envelope threshold value
+                    threshold_value = thresholds[i]
+                    
+                    # Calculate the envelope of THIS processed data to get scale
+                    from scipy.signal import hilbert
+                    instantaneous_amplitude = np.abs(hilbert(ch_data))
+                    envelope_ptp = np.ptp(instantaneous_amplitude)
+                    
+                    # Normalize threshold using ENVELOPE scale, not signal scale
+                    threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8
+                    threshold_y = y_offset + threshold_normalized
+                    
+                    # Draw threshold line
+                    pen_thresh = pg.mkPen(color='red', width=2, style=Qt.DashLine)
+                    threshold_line = self.comparison_plot_widget.plot(
+                        [proc_timestamps[0], proc_timestamps[-1]],
+                        [threshold_y, threshold_y],
+                        pen=pen_thresh
+                    )
+                    self.comparison_threshold_lines.append(threshold_line)
+                    
+                    # Add label
+                    text_label = pg.TextItem(
+                        text=f"Threshold (3σ): {threshold_value:.2f}",
+                        color=(255, 0, 0),
+                        anchor=(0, 0.5),
+                        fill=(255, 255, 255, 200)
+                    )
+                    text_label.setPos(proc_timestamps[0] + (proc_timestamps[-1] - proc_timestamps[0]) * 0.02, threshold_y)
+                    self.comparison_plot_widget.addItem(text_label)
+                    self.comparison_threshold_labels.append(text_label)
+
+        # Add channel name labels on Y-axis
             # Add channel name labels on Y-axis
             y_axis = self.comparison_plot_widget.getAxis('left')
             ticks = []
@@ -1257,11 +1436,12 @@ class OpenEphysMainWindow(QMainWindow):
             
             # Setup controls
             self._setup_comparison_controls()
-            
+            if self.sleep_scoring_data is not None:
+                print("Adding sleep scoring to comparison view...")
+                self.add_sleep_scoring_to_comparison()
+    
             QApplication.processEvents()
-            print("DEBUG: create_comparison_view finished!")
-            
-            # ========== END OF CODE INSIDE TRY BLOCK ==========
+            print("✓✓✓ Comparison view created with RESIZABLE splitter!")
             
         except Exception as e:
             import traceback
@@ -1529,18 +1709,199 @@ class OpenEphysMainWindow(QMainWindow):
         """Update UI state based on loaded data"""
         has_data = self.current_data is not None
         
-        print(f"DEBUG: update_ui_state called")
-        print(f"DEBUG: self.current_data is None = {self.current_data is None}")
-        print(f"DEBUG: has_data = {has_data}")
-        
         self.actionClose.setEnabled(has_data)
         self.actionPreprocess.setEnabled(has_data) 
         self.actionChannelSelect.setEnabled(has_data)
         self.actionPlotData.setEnabled(has_data)
         self.actionResetZoom.setEnabled(has_data)
+        self.actionLoadSleepScoring.setEnabled(has_data)
     
         print(f"DEBUG: Preprocess menu enabled = {self.actionPreprocess.isEnabled()}")
-    
+    def load_sleep_scoring(self):
+        """Load sleep scoring data from .mat file"""
+        if self.current_data is None:
+            QMessageBox.warning(self, "No Data", 
+                              "Please load neural data first before loading sleep scoring.")
+            return
+        
+        # Get duration and sampling rate from current data
+        if self.current_index >= 0:
+            timestamps = self.datasets[self.current_index]["timestamps"]
+            if timestamps is not None:
+                duration = timestamps[-1] - timestamps[0]
+            else:
+                duration = len(self.current_data) / self.current_header.get('sampleRate', 1000)
+        else:
+            duration = len(self.current_data) / self.current_header.get('sampleRate', 1000)
+        
+        fs = self.current_header.get('sampleRate', 1000)
+        
+        # Open dialog
+        dialog = SleepScoringDialog(
+            neural_data_duration=duration,
+            neural_fs=fs,
+            parent=self 
+    )
+        
+        if dialog.exec_() == QDialog.Accepted:
+            self.sleep_scoring_data = dialog.get_sleep_scoring_data()
+            
+            if self.sleep_scoring_data:
+                unique_states = len(np.unique(self.sleep_scoring_data['states']))
+                QMessageBox.information(
+                    self, "Sleep Scoring Loaded",
+                    f"Sleep scoring loaded successfully!\n\n"
+                f"Duration: {duration:.1f} seconds\n"
+                    f"States: {unique_states} unique states\n\n"
+                f"Sleep scoring will appear in comparison view when you preprocess data."           
+                )
+            
+            
+                print(f"Sleep scoring loaded: {len(self.sleep_scoring_data['states'])} samples")
+
+    def add_sleep_scoring_to_comparison(self):
+        """Add sleep scoring track to comparison view"""
+        if self.sleep_scoring_data is None or not hasattr(self, 'comparison_plot_widget'):
+            return
+        
+        try:
+            states = self.sleep_scoring_data['states']
+            state_names = self.sleep_scoring_data['state_names']
+            
+            # Create timestamps for sleep scoring
+            if hasattr(self, 'comparison_raw_timestamps') and self.comparison_raw_timestamps is not None:
+                # Align with neural data timestamps
+                fs = self.sleep_scoring_data.get('sampling_rate', 1000)
+                timestamps = np.linspace(
+                    self.comparison_raw_timestamps[0],
+                    self.comparison_raw_timestamps[-1],
+                    len(states)
+                )
+            else:
+                fs = self.sleep_scoring_data.get('sampling_rate', 1000)
+                timestamps = np.arange(len(states)) / fs
+            
+            # Define colors for each state (RGBA format)
+            state_colors = {
+               0: (220, 220, 220, 100),  # Unscored - Light Grey
+               
+                1: (200, 230, 200, 120),  # Awake - Soft Green
+                3: (200, 220, 240, 120),  # Non-REM - Soft Blue
+                5: (240, 210, 220, 120),  # REM - Soft Pink
+                4: (230, 210, 240, 120)   # Intermediate - Soft Purple
+            }
+            # Calculate y-position for sleep scoring track
+            n_channels = len(self.comparison_channel_names) if hasattr(self, 'comparison_channel_names') else 1
+            spacing = self.comparison_spacing if hasattr(self, 'comparison_spacing') else 100
+            
+            # Sleep scoring track at the very top
+            track_height = spacing * 0.8
+            track_y_position = (n_channels * 2 + 3) * spacing
+            
+            # Remove old sleep scoring items if they exist
+            if hasattr(self, 'sleep_scoring_items') and self.sleep_scoring_items:
+                for item in self.sleep_scoring_items:
+                    try:
+                        self.comparison_plot_widget.removeItem(item)
+                    except:
+                        pass
+            
+            self.sleep_scoring_items = []
+            
+            # Plot sleep states as colored rectangles
+            current_state = states[0]
+            start_idx = 0
+            
+            for i in range(1, len(states) + 1):
+                # Check if state changed or end of data
+                if i == len(states) or states[i] != current_state:
+                    # Draw rectangle for this state period
+                    start_time = timestamps[start_idx]
+                    end_time = timestamps[i-1] if i < len(timestamps) else timestamps[-1]
+                    
+                    # Get color for this state
+                    color = state_colors.get(current_state, (128, 128, 128, 100))
+                    
+                    # Create filled rectangle using LinearRegionItem
+                    from pyqtgraph import LinearRegionItem
+                    region = LinearRegionItem(
+                        values=[start_time, end_time],
+                        orientation='vertical',
+                        brush=pg.mkBrush(color),
+                        movable=False,
+                        pen=pg.mkPen(None)
+                    )
+                    
+                    # Set the region to the correct y-range
+                    region.setZValue(-10)  # Behind the data
+                    self.comparison_plot_widget.addItem(region)
+                    self.sleep_scoring_items.append(region)
+                    
+                    # Update for next segment
+                    if i < len(states):
+                        current_state = states[i]
+                        start_idx = i
+            
+            # Add label at the top
+            label_item = pg.TextItem(
+                "Sleep States:",
+                anchor=(0, 0.5),
+                color=(0, 0, 0)
+            )
+            label_item.setFont(QFont("Arial", 10, QFont.Bold))
+            label_item.setPos(timestamps[0], track_y_position + track_height * 0.6)
+            self.comparison_plot_widget.addItem(label_item)
+            self.sleep_scoring_items.append(label_item)
+            
+            # Add legend for states
+            legend_x = timestamps[0] + (timestamps[-1] - timestamps[0]) * 0.02
+            legend_y = track_y_position + track_height * 0.3
+            
+            for state_val, color in state_colors.items():
+                if state_val in np.unique(states):
+                    # Create small colored box
+                    box_width = (timestamps[-1] - timestamps[0]) * 0.015
+                    box = pg.QtGui.QGraphicsRectItem(
+                        legend_x, 
+                        legend_y - track_height * 0.15,
+                        box_width,
+                        track_height * 0.3
+                    )
+                    box.setBrush(pg.mkBrush(color))
+                    box.setPen(pg.mkPen((0, 0, 0), width=1))
+                    self.comparison_plot_widget.addItem(box)
+                    self.sleep_scoring_items.append(box)
+                    
+                    # Add text label
+                    text = pg.TextItem(
+                        state_names.get(state_val, f'State {state_val}'),
+                        anchor=(0, 0.5),
+                        color=(0, 0, 0)
+                    )
+                    text.setPos(legend_x + box_width * 1.5, legend_y)
+                    self.comparison_plot_widget.addItem(text)
+                    self.sleep_scoring_items.append(text)
+                    
+                    # Move to next legend position
+                    legend_x += (timestamps[-1] - timestamps[0]) * 0.12
+            
+            # Update y-axis range to include sleep scoring
+            current_y_range = self.comparison_plot_widget.viewRange()[1]
+            new_max = max(current_y_range[1], track_y_position + track_height * 1.2)
+            self.comparison_plot_widget.setYRange(
+                current_y_range[0], 
+                new_max, 
+                padding=0.05
+            )
+            
+            print("Sleep scoring track added to comparison view")
+            print(f"   States displayed: {np.unique(states)}")
+            print(f"   Duration: {timestamps[-1] - timestamps[0]:.1f} seconds")
+            
+        except Exception as e:
+            print(f"Error adding sleep scoring: {e}")
+            import traceback
+            traceback.print_exc()
     def select_channels(self):
         """Open channel selection dialog"""
         if self.current_data is None:
@@ -1569,7 +1930,6 @@ class OpenEphysMainWindow(QMainWindow):
             
             self.add_dataset(selected_dataset)
         
-    
     def on_processing_error(self, error_msg):
         """Handle processing errors"""
         QMessageBox.critical(self, "Processing Error", f"Error occurred:\n{error_msg}")
@@ -1733,20 +2093,29 @@ class OpenEphysMainWindow(QMainWindow):
         print("✓ _setup_comparison_controls COMPLETE")
 
     def _add_comparison_slider(self):
-        """Add navigation slider to comparison view"""
-        layout = self.comparison_page.layout()
+        """Add navigation slider to comparison view - FIXED to place above annotations"""
         
-        # Find plot widget position
-        plot_idx = -1
-        for i in range(layout.count()):
-            if layout.itemAt(i).widget() == self.comparison_plot_widget:
-                plot_idx = i
-                break
+        # ==================================================================
+        # FIX: Use the stored layout reference instead of searching
+        # ==================================================================
+        
+        if not hasattr(self, 'comparison_plot_slider_layout'):
+            print("Warning: comparison_plot_slider_layout not found!")
+            return
+        
+        # Remove any existing slider first
+        if hasattr(self, 'comparison_slider_widget') and self.comparison_slider_widget is not None:
+            try:
+                self.comparison_plot_slider_layout.removeWidget(self.comparison_slider_widget)
+                self.comparison_slider_widget.deleteLater()
+            except:
+                pass
         
         # Create slider widget
         from PyQt5.QtWidgets import QSlider
         self.comparison_slider_widget = QWidget()
         slider_layout = QHBoxLayout(self.comparison_slider_widget)
+        slider_layout.setContentsMargins(5, 0, 5, 5)
         
         self.comparison_slider = QSlider(Qt.Horizontal)
         self.comparison_slider.setMinimum(0)
@@ -1780,9 +2149,10 @@ class OpenEphysMainWindow(QMainWindow):
         
         slider_layout.addWidget(self.comparison_slider)
         
-        # Insert slider below plot
-        if plot_idx >= 0:
-            layout.insertWidget(plot_idx + 1, self.comparison_slider_widget)
+        # Add slider to the plot_slider_layout (below plot, above annotations)
+        self.comparison_plot_slider_layout.addWidget(self.comparison_slider_widget)
+        
+        print("✓ Slider added to correct location (below plot, above annotations)")
 
     def _comparison_slider_moved(self, val):
         """Handle slider movement"""

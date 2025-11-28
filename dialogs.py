@@ -154,7 +154,7 @@ class PreprocessingDialog(QDialog):
         group_layout.addWidget(QLabel("Low cutoff (Hz):"), 2, 0)
         self.low_cutoff = QDoubleSpinBox()
         self.low_cutoff.setRange(0.1, 500.0)  # Fixed: reasonable range
-        self.low_cutoff.setValue(80.0)
+        self.low_cutoff.setValue(100.0)
         self.low_cutoff.setSingleStep(10.0)
         group_layout.addWidget(self.low_cutoff, 2, 1)
         

@@ -327,24 +327,36 @@ class PlotManager:
         return max(base_spacing, 10)
     
     def _add_slider(self):
-        layout = self.parent.plot_page.layout()
-        if not layout:
-            layout = QVBoxLayout(self.parent.plot_page)
+        """Add navigation slider to main plot view - FIXED for resizable layout"""
         
+        # Use the plot_container_layout stored in main window
+        if not hasattr(self.parent, 'plot_container_layout'):
+            print("Warning: plot_container_layout not found! Using old method.")
+            # Fallback to old method if layout not found
+            layout = self.parent.plot_page.layout()
+            if not layout:
+                layout = QVBoxLayout(self.parent.plot_page)
+        else:
+            layout = self.parent.plot_container_layout
+        
+        # Remove existing slider if present
         if hasattr(self, 'nav_slider') and self.nav_slider:
-            self.nav_slider.setParent(None)
+            try:
+                layout.removeWidget(self.nav_slider)
+                self.nav_slider.deleteLater()
+            except:
+                pass
             self.nav_slider = None
         
         if hasattr(self, 'slider_widget') and self.slider_widget:
-            self.slider_widget.setParent(None)
+            try:
+                layout.removeWidget(self.slider_widget)
+                self.slider_widget.deleteLater()
+            except:
+                pass
             self.slider_widget = None
         
-        plot_idx = -1
-        for i in range(layout.count()):
-            if layout.itemAt(i).widget() == self.plot_widget:
-                plot_idx = i
-                break
-        
+        # Create new slider
         self.nav_slider = QSlider(Qt.Horizontal)
         self.nav_slider.setMinimum(0)
         
@@ -383,41 +395,10 @@ class PlotManager:
         
         self.nav_slider.setMaximumHeight(30)
         
-        self.btn_left = QPushButton("◀")
-        self.btn_right = QPushButton("▶")
+        # Add slider to plot_container_layout (below plot, above annotations)
+        layout.addWidget(self.nav_slider)
         
-        btn_style = """
-            QPushButton {
-                min-width: 30px;
-                max-width: 30px;
-                min-height: 25px;
-                font-weight: bold;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                background: #f8f8f8;
-                margin: 0px 5px;
-            }
-            QPushButton:hover {
-                background: #e8e8e8;
-            }
-        """
-        
-        self.btn_left.setStyleSheet(btn_style)
-        self.btn_right.setStyleSheet(btn_style)
-        
-        self.btn_left.clicked.connect(self._move_left)
-        self.btn_right.clicked.connect(self._move_right)
-        
-        self.slider_widget = QWidget()
-        slider_layout = QHBoxLayout(self.slider_widget)
-        slider_layout.addWidget(self.btn_left)
-        slider_layout.addWidget(self.nav_slider)
-        slider_layout.addWidget(self.btn_right)
-        
-        if plot_idx >= 0:
-            layout.insertWidget(plot_idx + 1, self.slider_widget)
-        else:
-            layout.addWidget(self.slider_widget)
+        print("✓ Main view slider added (below plot, above annotations)")
     
     def _move_left(self):
         if self.absolute_timestamps is None:

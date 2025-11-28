@@ -290,7 +290,6 @@ class AnnotationWidget(QListWidget):
             
             edit_action = menu.addAction("Edit")
             delete_action = menu.addAction("Delete")
-            navigate_action = menu.addAction("Navigate to Event")
             
             action = menu.exec_(self.mapToGlobal(pos))
             
@@ -464,14 +463,20 @@ class DragToMarkAnnotation(QObject):
         self.drag_region = None
         self.drag_complete = False 
         self.drag_threshold = 0.005  # 5ms threshold to consider as point event
+        
+        # Store permanent annotation regions
+        self.annotation_regions = []
 
         # Connect mouse events
         self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_click)
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_move)
         
+        # Connect to annotation changes to update visual regions
+        self.annotation_manager.annotations_changed.connect(self.update_annotation_regions)
+        
         print("Drag-to-mark annotation enabled:")
-        print("  • Left-click and drag to select time region")
-        print("  • Release to open annotation dialog")
+        print("  â€¢ Left-click and drag to select time region")
+        print("  â€¢ Release to open annotation dialog")
     
     def on_mouse_click(self, event):
         """Handle mouse click events"""
@@ -564,6 +569,26 @@ class DragToMarkAnnotation(QObject):
                     category=data['category'],
                     channel_name=data['channel_name']
                 )
+    
+    def update_annotation_regions(self):
+        """Update visual regions for all annotations"""
+        # Clear existing regions
+        for region in self.annotation_regions:
+            self.plot_widget.removeItem(region)
+        self.annotation_regions.clear()
+        
+        # Create regions for all annotations
+        for ann in self.annotation_manager.annotations:
+            if not ann.is_point_event():  # Only show regions for duration events
+                region = pg.LinearRegionItem(
+                    [ann.start_time, ann.end_time],
+                    brush=(180, 180, 180, 80),  # Gray shadow
+                    pen=None,  # No border for cleaner look
+                    movable=False
+                )
+                region.setZValue(-10)  # Behind the data curves
+                self.plot_widget.addItem(region)
+                self.annotation_regions.append(region)
 
 
 def add_drag_to_mark_annotation(plot_widget, annotation_manager):
