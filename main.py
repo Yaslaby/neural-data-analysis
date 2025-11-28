@@ -1,5 +1,6 @@
 import sys
 import os
+import seaborn as sns
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                              QWidget, QLabel, QSplitter, QListWidget, QListWidgetItem,
@@ -1170,11 +1171,6 @@ class OpenEphysMainWindow(QMainWindow):
     def create_comparison_view(self, raw_data, raw_timestamps, proc_data, proc_timestamps, 
                       channel_names, original_fs, target_fs, thresholds=None):
         """Create comparison view with amplitude control support - FULLY FIXED VERSION"""
-        print(f"🔍 DEBUG: create_comparison_view called")
-        print(f"🔍 DEBUG: thresholds = {thresholds}")
-        print(f"🔍 DEBUG: thresholds is None? {thresholds is None}")
-        if thresholds:
-            print(f"🔍 DEBUG: thresholds length = {len(thresholds)}")
         
         try:
             QApplication.processEvents()
