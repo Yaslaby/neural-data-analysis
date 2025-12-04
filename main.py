@@ -8,10 +8,11 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QToolBar, QSlider, QComboBox, QPushButton, QSizePolicy)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QMutex
 from PyQt5.QtGui import QFont
-
+from PyQt5.QtWidgets import QSizePolicy, QFrame
+from PyQt5.QtWidgets import QHeaderView
 # Import existing modules
 from PlotManager import PlotManager
-from integrated_mne_processing import process_for_ripples_mne_standard as process_for_ripples
+from integrated_mne_processing import process_for_ripples_mne_standard as process_for_ripples, detect_ripples_mne_standard
 from MultiChannelLoader import MultiChannelLoader, load_single_channel
 from annotation import (AnnotationManager, AnnotationWidget, add_right_click_annotation, AnnotationControls,  add_drag_to_mark_annotation)
 from signal_processing import SignalProcessingWorker
@@ -494,6 +495,81 @@ class OpenEphysMainWindow(QMainWindow):
         info_layout.addWidget(self.info_table)
         
         self.splitter.addWidget(info_widget)
+        self.sleep_legend = self.create_sleep_scoring_legend()
+        info_layout.addWidget(self.sleep_legend)
+        
+    def create_sleep_scoring_legend(self):
+        """Create a compact sleep scoring color legend widget"""
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel, QFrame
+        from PyQt5.QtGui import QFont, QPalette, QColor
+        from PyQt5.QtCore import Qt
+        
+        legend_widget = QWidget()
+        legend_widget.setMaximumHeight(200)
+        legend_layout = QVBoxLayout(legend_widget)
+        legend_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Title
+        title = QLabel("Sleep State Color Legend")
+        title.setFont(QFont("Arial", 12, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("padding: 3px; background: #f0f8ff; border: 1px solid #ccc;")
+        legend_layout.addWidget(title)
+        
+        # Color grid
+        colors_group = QWidget()
+        colors_layout = QGridLayout(colors_group)
+        colors_layout.setSpacing(3)
+        colors_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # State definitions (from sleep_scoring_dialog.py)
+        STATE_COLORS = {
+            0: (220, 220, 220, 100),  # Unscored - Light Grey
+            1: (200, 230, 200, 120),  # Awake - Soft Green
+            3: (200, 220, 240, 120),  # Non-REM - Soft Blue
+            5: (240, 210, 220, 120),  # REM - Soft Pink
+            4: (230, 210, 240, 120)   # Intermediate - Soft Purple
+        }
+        
+        STATE_NAMES = {
+            0: 'Unscored',
+            1: 'Awake',
+            3: 'Non-REM',
+            5: 'REM',
+            4: 'Intermediate'
+        }
+        
+        row = 0
+        for state_code in sorted(STATE_COLORS.keys()):
+            color = STATE_COLORS[state_code]
+            name = STATE_NAMES[state_code]
+            
+            # Color square
+            color_square = QFrame()
+            color_square.setFixedSize(20, 20)
+            color_square.setFrameStyle(QFrame.Box | QFrame.Plain)
+            color_square.setLineWidth(1)
+            
+            palette = color_square.palette()
+            palette.setColor(QPalette.Window, QColor(color[0], color[1], color[2], color[3]))
+            color_square.setPalette(palette)
+            color_square.setAutoFillBackground(True)
+            
+            colors_layout.addWidget(color_square, row, 0)
+            
+            # State name
+            name_label = QLabel(name)
+            name_label.setFont(QFont("Arial", 12))
+            name_label.setStyleSheet("padding: 2px;")
+            colors_layout.addWidget(name_label, row, 1)
+            
+            row += 1
+        
+        legend_layout.addWidget(colors_group)
+        legend_layout.addStretch()
+        
+        return legend_widget
+    
     
     def create_menus(self):
         """Create simplified menu bar - File, Edit, View, Plot only"""
@@ -528,6 +604,7 @@ class OpenEphysMainWindow(QMainWindow):
         self.actionPreprocess = edit_menu.addAction('&Preprocess Data...')
         self.actionPreprocess.triggered.connect(self.preprocess_data)
         self.actionPreprocess.setEnabled(False)
+       
 
         edit_menu.addSeparator()
         
@@ -598,6 +675,11 @@ class OpenEphysMainWindow(QMainWindow):
                 color: black;
             }
         """)
+    def run_ripple_detection(self):
+        """Placeholder for ripple detection - to be implemented"""
+        QMessageBox.information(self, "Ripple Detection", 
+                               "Ripple detection will be implemented here.\n\n"
+                               "This will use the Karlsson & Frank method.")
     
     def setup_managers(self):
         """Setup manager classes"""
@@ -957,7 +1039,8 @@ class OpenEphysMainWindow(QMainWindow):
             error_msg = f"Failed to open preprocessing dialog: {str(e)}\n{traceback.format_exc()}"
             log_error(error_msg)
             QMessageBox.critical(self, "Error", f"Failed to open preprocessing dialog:\n{str(e)}")
-            
+    
+       
     def start_robust_preprocessing(self, params):
         """Start preprocessing with comparison view output"""
         try:
@@ -1015,16 +1098,14 @@ class OpenEphysMainWindow(QMainWindow):
                             f"Failed to start preprocessing:\n{str(e)}")
             traceback.print_exc()
         
-    def on_robust_preprocessing_complete(self, raw_data, raw_timestamps, proc_data, 
-                                    proc_timestamps, channel_names, original_fs, target_fs):
-        """Handle successful preprocessing completion with comparison view"""
+    def on_robust_preprocessing_complete(self, raw_data, raw_timestamps, proc_data, proc_timestamps, channel_names, original_fs, target_fs):
+        #"Handle successful preprocessing completion with comparison view
         try:
             print("=== PREPROCESSING COMPLETE - DEBUG ===")
             print(f"Raw data shape: {raw_data.shape}")
             print(f"Processed data shape: {proc_data.shape}")
             print(f"About to create comparison view...")
-    
-        
+            
             # Close progress dialog
             if self.progress_dialog:
                 self.progress_dialog.close()
@@ -1034,28 +1115,36 @@ class OpenEphysMainWindow(QMainWindow):
             real_channel_names = self.get_real_channel_names(len(channel_names))
             print(f"Real channel names: {real_channel_names}")
             
-            # Calculate threshold using Karlsson & Frank method
-            thresholds = []
+            # ================================================================
+            # Calculate thresholds for RAW data (BEFORE section)
+            # ================================================================
+            from scipy.signal import hilbert
+            
+            raw_thresholds = []
+            for i in range(raw_data.shape[1]):
+                ch_data = raw_data[:, i]
+                envelope = np.abs(hilbert(ch_data))
+                threshold_value = np.mean(envelope) + 3.0 * np.std(envelope)
+                raw_thresholds.append(threshold_value)
+                print(f"Raw Channel {i}: Threshold = {threshold_value:.6f}")
+            
+            # ================================================================
+            # Calculate thresholds for PROCESSED data (AFTER section)
+            # ================================================================
+            proc_thresholds = []
             for i in range(proc_data.shape[1]):
                 ch_data = proc_data[:, i]
-                
-                results = find_ripples_karlsson(
-                    ch_data, 
-                    fs=target_fs,
-                    min_duration=0.015,
-                    zscore_thresh=3.0,
-                    smoothing_sigma=0.004,
-                    f_plot=0
-                )
-                
-                thresholds.append(results['thresh_envelope'])
-                print(f"✓ Channel {i}: Threshold = {results['thresh_envelope']:.6f}")
-                    
-            # CREATE COMPARISON VIEW - this is the key step
+                envelope = np.abs(hilbert(ch_data))
+                threshold_value = np.mean(envelope) + 3.0 * np.std(envelope)
+                proc_thresholds.append(threshold_value)
+                print(f"Proc Channel {i}: Threshold = {threshold_value:.6f}")
+
+            # CREATE COMPARISON VIEW - pass both threshold lists
             print("Calling create_comparison_view...")
             self.create_comparison_view(
                 raw_data, raw_timestamps, proc_data, proc_timestamps,
-                real_channel_names, original_fs, target_fs, thresholds=thresholds
+                real_channel_names, original_fs, target_fs,
+                raw_thresholds=raw_thresholds, proc_thresholds=proc_thresholds
             )
             print("✓ Comparison view created")
             
@@ -1079,7 +1168,8 @@ class OpenEphysMainWindow(QMainWindow):
             
             QMessageBox.information(self, "Preprocessing Complete", 
                                 f"Processing successful!\n\n"
-                                f"View shows before vs after preprocessing")
+                                f"View shows before vs after preprocessing\n"
+                                f"Red dashed lines = ripple detection threshold (3σ)")
             
         except Exception as e:
             print(f"ERROR in preprocessing complete: {str(e)}")
@@ -1168,7 +1258,7 @@ class OpenEphysMainWindow(QMainWindow):
             self.progress_dialog = None
     
     def create_comparison_view(self, raw_data, raw_timestamps, proc_data, proc_timestamps, 
-                      channel_names, original_fs, target_fs, thresholds=None):
+                          channel_names, original_fs, target_fs, raw_thresholds=None, proc_thresholds=None):
         """Create comparison view with amplitude control support - FULLY FIXED VERSION"""
         
         try:
@@ -1321,6 +1411,36 @@ class OpenEphysMainWindow(QMainWindow):
                     downsampleMethod='peak'
                 )
                 self.comparison_raw_curves.append(curve)
+                
+                # ★ ADD THRESHOLD LINE FOR BEFORE (raw/downsampled) using Karlsson method ★
+                if raw_thresholds and i < len(raw_thresholds):
+                    threshold_value = raw_thresholds[i]
+                    
+                    # Calculate envelope for proper scaling
+                    from scipy.signal import hilbert
+                    envelope = np.abs(hilbert(ch_data))
+                    envelope_ptp = np.ptp(envelope)
+                    
+                    if envelope_ptp > 0:
+                        threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8 + y_offset
+                        
+                        # Plot threshold as red dashed line
+                        pen_thresh = pg.mkPen(color='red', width=1, style=Qt.SolidLine)
+                        thresh_line = self.comparison_plot_widget.plot(
+                            [raw_timestamps[0], raw_timestamps[-1]], 
+                            [threshold_normalized, threshold_normalized],
+                            pen=pen_thresh
+                        )
+                        
+                        # Add threshold label
+                        text_label = pg.TextItem(
+                            text=f"Thresh (3σ): {threshold_value:.2f}",
+                            color=(255, 0, 0),
+                            anchor=(0, 0.5),
+                            fill=(255, 255, 255, 200)
+                        )
+                        text_label.setPos(raw_timestamps[0] + (raw_timestamps[-1] - raw_timestamps[0]) * 0.02, threshold_normalized + self.comparison_spacing * 0.15)
+                        self.comparison_plot_widget.addItem(text_label)
             
             # Separator
             separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
@@ -1351,46 +1471,36 @@ class OpenEphysMainWindow(QMainWindow):
                     downsampleMethod='peak'
                 )
                 self.comparison_proc_curves.append(curve)
-
-            if thresholds and len(thresholds) == n_channels:
-                self.comparison_threshold_lines = []
-                self.comparison_threshold_labels = []
                 
-                for i in range(n_channels):
-                    y_offset = (n_channels - 1 - i) * self.comparison_spacing
-                    ch_data = proc_data[:, i]
+                # ★ ADD THRESHOLD LINE FOR AFTER (processed) using Karlsson method ★
+                if proc_thresholds and i < len(proc_thresholds):
+                    threshold_value = proc_thresholds[i]
                     
-                    # Get envelope threshold value
-                    threshold_value = thresholds[i]
-                    
-                    # Calculate the envelope of THIS processed data to get scale
+                    # Calculate envelope for proper scaling
                     from scipy.signal import hilbert
-                    instantaneous_amplitude = np.abs(hilbert(ch_data))
-                    envelope_ptp = np.ptp(instantaneous_amplitude)
+                    envelope = np.abs(hilbert(ch_data))
+                    envelope_ptp = np.ptp(envelope)
                     
-                    # Normalize threshold using ENVELOPE scale, not signal scale
-                    threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8
-                    threshold_y = y_offset + threshold_normalized
-                    
-                    # Draw threshold line
-                    pen_thresh = pg.mkPen(color='red', width=2, style=Qt.DashLine)
-                    threshold_line = self.comparison_plot_widget.plot(
-                        [proc_timestamps[0], proc_timestamps[-1]],
-                        [threshold_y, threshold_y],
-                        pen=pen_thresh
-                    )
-                    self.comparison_threshold_lines.append(threshold_line)
-                    
-                    # Add label
-                    text_label = pg.TextItem(
-                        text=f"Threshold (3σ): {threshold_value:.2f}",
-                        color=(255, 0, 0),
-                        anchor=(0, 0.5),
-                        fill=(255, 255, 255, 200)
-                    )
-                    text_label.setPos(proc_timestamps[0] + (proc_timestamps[-1] - proc_timestamps[0]) * 0.02, threshold_y)
-                    self.comparison_plot_widget.addItem(text_label)
-                    self.comparison_threshold_labels.append(text_label)
+                    if envelope_ptp > 0:
+                        threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8 + y_offset
+                        
+                        # Plot threshold as red dashed line
+                        pen_thresh = pg.mkPen(color='red', width=1, style=Qt.SolidLine)
+                        thresh_line = self.comparison_plot_widget.plot(
+                            [proc_timestamps[0], proc_timestamps[-1]], 
+                            [threshold_normalized, threshold_normalized],
+                            pen=pen_thresh
+                        )
+                        
+                        # Add threshold label
+                        text_label = pg.TextItem(
+                            text=f"Thresh (3σ): {threshold_value:.2f}",
+                            color=(255, 0, 0),
+                            anchor=(0, 0.5),
+                            fill=(255, 255, 255, 200)
+                        )
+                        text_label.setPos(proc_timestamps[0] + (proc_timestamps[-1] - proc_timestamps[0]) * 0.02, threshold_normalized + self.comparison_spacing * 0.15)
+                        self.comparison_plot_widget.addItem(text_label)
 
         # Add channel name labels on Y-axis
             # Add channel name labels on Y-axis
@@ -1709,6 +1819,8 @@ class OpenEphysMainWindow(QMainWindow):
         self.actionChannelSelect.setEnabled(has_data)
         self.actionPlotData.setEnabled(has_data)
         self.actionResetZoom.setEnabled(has_data)
+        if hasattr(self, 'actionRippleDetect'):
+            self.actionRippleDetect.setEnabled(has_data)
         self.actionLoadSleepScoring.setEnabled(has_data)
     
         print(f"DEBUG: Preprocess menu enabled = {self.actionPreprocess.isEnabled()}")
