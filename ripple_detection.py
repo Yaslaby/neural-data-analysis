@@ -9,7 +9,6 @@ from scipy.signal import iirnotch, butter, filtfilt, hilbert, convolve, get_wind
 from scipy.signal.windows import gaussian
 from scipy.stats import zscore
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 def filter_lfp(lfp, fs, freq_range):
     """Bandpass filter for LFP signal"""
