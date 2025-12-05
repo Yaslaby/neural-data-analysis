@@ -1378,7 +1378,7 @@ class OpenEphysMainWindow(QMainWindow):
             self.comparison_channel_names = channel_names
             
             n_channels = min(len(channel_names), raw_data.shape[1], proc_data.shape[1])
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+            colors = ['black', '#ff7f0e', '#2ca02c', '#d62728']
             
             # Calculate spacing
             all_data = np.concatenate([raw_data[:, :n_channels], proc_data[:, :n_channels]], axis=1)
@@ -1400,7 +1400,7 @@ class OpenEphysMainWindow(QMainWindow):
                 self.comparison_raw_normalized.append(normalized_base)
                 
                 normalized = normalized_base + y_offset
-                pen = pg.mkPen(color=colors[i % len(colors)], width=2)
+                pen = pg.mkPen(color=colors[i % len(colors)], width=1)
                 
                 curve = self.comparison_plot_widget.plot(
                     raw_timestamps, normalized, 
@@ -1411,36 +1411,6 @@ class OpenEphysMainWindow(QMainWindow):
                     downsampleMethod='peak'
                 )
                 self.comparison_raw_curves.append(curve)
-                
-                # ★ ADD THRESHOLD LINE FOR BEFORE (raw/downsampled) using Karlsson method ★
-                if raw_thresholds and i < len(raw_thresholds):
-                    threshold_value = raw_thresholds[i]
-                    
-                    # Calculate envelope for proper scaling
-                    from scipy.signal import hilbert
-                    envelope = np.abs(hilbert(ch_data))
-                    envelope_ptp = np.ptp(envelope)
-                    
-                    if envelope_ptp > 0:
-                        threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8 + y_offset
-                        
-                        # Plot threshold as red dashed line
-                        pen_thresh = pg.mkPen(color='red', width=1, style=Qt.SolidLine)
-                        thresh_line = self.comparison_plot_widget.plot(
-                            [raw_timestamps[0], raw_timestamps[-1]], 
-                            [threshold_normalized, threshold_normalized],
-                            pen=pen_thresh
-                        )
-                        
-                        # Add threshold label
-                        text_label = pg.TextItem(
-                            text=f"Thresh (3σ): {threshold_value:.2f}",
-                            color=(255, 0, 0),
-                            anchor=(0, 0.5),
-                            fill=(255, 255, 255, 200)
-                        )
-                        text_label.setPos(raw_timestamps[0] + (raw_timestamps[-1] - raw_timestamps[0]) * 0.02, threshold_normalized + self.comparison_spacing * 0.15)
-                        self.comparison_plot_widget.addItem(text_label)
             
             # Separator
             separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
@@ -1460,7 +1430,7 @@ class OpenEphysMainWindow(QMainWindow):
                 self.comparison_proc_normalized.append(normalized_base)
                 
                 normalized = normalized_base + y_offset
-                pen = pg.mkPen(color=colors[i % len(colors)], width=2, style=Qt.SolidLine)
+                pen = pg.mkPen(color=colors[i % len(colors)], width=1, style=Qt.SolidLine)
                 
                 curve = self.comparison_plot_widget.plot(
                     proc_timestamps, normalized,

@@ -51,7 +51,7 @@ class PlotManager:
         self.current_window_index = 0
         
         self.colors = [
-            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+            'black', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
             '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
         ]
     
@@ -260,7 +260,7 @@ class PlotManager:
             print("Initial ticks configured")
     
     def _plot_single(self, data):
-        pen = pg.mkPen(self.colors[0], width=1.5)
+        pen = pg.mkPen(self.colors[0], width=1)
         
         opts = {
             'pen': pen,
@@ -288,7 +288,7 @@ class PlotManager:
         
         for i in range(n_ch):
             color = self.colors[i % len(self.colors)]
-            pen = pg.mkPen(color, width=1.5)
+            pen = pg.mkPen(color, width=1)
             
             ch_data = data[:, i]
             ptp = np.ptp(ch_data)

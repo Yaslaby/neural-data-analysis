@@ -40,7 +40,7 @@ class Annotation:
         return {
             'start_time': self.start_time,
             'end_time': self.end_time,
-            'duration': self.duration,
+            'duration': self.duration * 1000,  # in milliseconds
             'description': self.description,
             'category': self.category,
             'channel_name': self.channel_name
@@ -88,7 +88,7 @@ class AnnotationManager(QObject):
         sorted_annotations = sorted(self.annotations, key=lambda x: x.start_time)
         
         with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['start_time', 'end_time', 'duration', 'description', 'category', 'channel_name']
+            fieldnames = ['start_time', 'end_time', 'duration ms', 'description', 'category', 'channel_name']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
