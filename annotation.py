@@ -409,13 +409,33 @@ class AnnotationControls(QHBoxLayout):
                 self.annotation_manager.clear_annotations()
     
     def export_annotations(self):
-        """Export annotations to CSV"""
+        """Export annotations to CSV - defaults to original data folder"""
         if not self.annotation_manager.annotations:
             QMessageBox.warning(self.parent_widget, "No Events", "No events to export.")
             return
         
+        # Get default save path from original data location
+        default_path = "events.csv"
+        try:
+            if (hasattr(self.parent_widget, 'datasets') and 
+                hasattr(self.parent_widget, 'current_index') and
+                self.parent_widget.current_index >= 0):
+                
+                original_file = self.parent_widget.datasets[self.parent_widget.current_index].get("file_path", "")
+                if original_file and isinstance(original_file, str):
+                    import os
+                    # Get directory of original file
+                    original_dir = os.path.dirname(original_file)
+                    # Get base name without extension
+                    base_name = os.path.splitext(os.path.basename(original_file))[0]
+                    # Create default filename: original_name_events.csv
+                    default_path = os.path.join(original_dir, f"{base_name}_events.csv")
+        except Exception as e:
+            print(f"Could not get original path: {e}")
+            default_path = "events.csv"
+        
         file_path, _ = QFileDialog.getSaveFileName(
-            self.parent_widget, "Export Events", "events.csv", "CSV Files (*.csv)"
+            self.parent_widget, "Export Events", default_path, "CSV Files (*.csv)"
         )
         
         if file_path:
@@ -427,7 +447,7 @@ class AnnotationControls(QHBoxLayout):
                 )
             except Exception as e:
                 QMessageBox.critical(self.parent_widget, "Export Error", f"Failed to export:\n{str(e)}")
-    
+        
     def update_stats(self):
         """Update statistics display"""
         total = len(self.annotation_manager.annotations)
