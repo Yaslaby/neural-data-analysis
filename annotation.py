@@ -40,7 +40,7 @@ class Annotation:
         return {
             'start_time': self.start_time,
             'end_time': self.end_time,
-            'duration': self.duration * 1000,  # in milliseconds
+            'duration ms': self.duration * 1000,  # in milliseconds
             'description': self.description,
             'category': self.category,
             'channel_name': self.channel_name
