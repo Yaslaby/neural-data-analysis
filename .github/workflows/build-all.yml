@@ -94,7 +94,7 @@ jobs:
         path: dist/NeuralDataAnalysis.exe
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-13
     steps:
     - uses: actions/checkout@v4
     
@@ -104,7 +104,8 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install PyQt5==5.15.9
+        pip install --upgrade pip
+        pip install PyQt5 --only-binary=:all:
         pip install numpy==1.24.3
         pip install scipy==1.10.1
         pip install matplotlib==3.7.2
