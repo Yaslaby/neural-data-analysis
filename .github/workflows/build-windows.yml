@@ -1,11 +1,11 @@
-name: Build macOS
+name: Build Windows
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-macos:
-    runs-on: macos-14
+  build-windows:
+    runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
     
@@ -15,8 +15,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install --upgrade pip
-        pip install PyQt5 --only-binary=:all:
+        pip install PyQt5==5.15.9
         pip install numpy==1.24.3
         pip install scipy==1.10.1
         pip install matplotlib==3.7.2
@@ -25,9 +24,10 @@ jobs:
         pip install mne==1.5.0
         pip install pyinstaller==6.3.0
     
-    - name: Create PyInstaller spec for macOS
+    - name: Create PyInstaller spec with MNE fixes
+      shell: pwsh
       run: |
-        cat > NeuralDataAnalysis.spec << 'EOF'
+        @'
         # -*- mode: python ; coding: utf-8 -*-
         from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -58,6 +58,8 @@ jobs:
             hooksconfig={},
             runtime_hooks=[],
             excludes=['matplotlib.tests', 'numpy.random._examples', 'tkinter'],
+            win_no_prefer_redirects=False,
+            win_private_assemblies=False,
             noarchive=False,
         )
 
@@ -80,24 +82,13 @@ jobs:
             console=False,
             disable_windowed_traceback=False,
         )
-
-        app = BUNDLE(
-            exe,
-            name='NeuralDataAnalysis.app',
-            bundle_identifier='com.neuraldata.analysis',
-        )
-        EOF
+        '@ | Out-File -FilePath NeuralDataAnalysis.spec -Encoding utf8
     
-    - name: Build macOS app
+    - name: Build executable
       run: |
         pyinstaller NeuralDataAnalysis.spec --clean
     
-    - name: Zip the app bundle
-      run: |
-        cd dist
-        zip -r NeuralDataAnalysis-macOS.zip NeuralDataAnalysis.app
-    
     - uses: actions/upload-artifact@v4
       with:
-        name: NeuralDataAnalysis-macOS
-        path: dist/NeuralDataAnalysis-macOS.zip
+        name: NeuralDataAnalysis-Windows
+        path: dist/NeuralDataAnalysis.exe
