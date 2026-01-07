@@ -8,3 +8,21 @@ __pycache__/
 .vscode/
 
 Sleep_scoring_integration.py
+
+# Old/unused files (kept locally)
+Demo_Project.ui
+Demo_Project_ui1.py
+MNE_Filter.py
+SNR calculator.py
+Signal Processing.py
+Trial_project/
+app_errors.log
+integrated_mne_processing.py
+mainwindow.ui
+nano build.sh
+neural_analyzer.spec
+phase_response_analyzer.py
+signal_processing.py
+.idea/
+.DS_Store
+
