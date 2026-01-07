@@ -1,244 +1,33 @@
 import sys
 import os
-from pathlib import Path
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
-                             QWidget, QLabel, QSplitter, QListWidget, QListWidgetItem,
-                             QTableWidget, QTableWidgetItem, QStackedWidget, 
-                             QMessageBox, QFileDialog, QDialog, QProgressDialog,
-                             QToolBar, QSlider, QComboBox, QPushButton, QSizePolicy)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QMutex
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QSizePolicy, QFrame
-from PyQt5.QtWidgets import QHeaderView
-# Import existing modules
-from PlotManager import PlotManager
-from integrated_mne_processing import process_for_ripples_mne_standard as process_for_ripples, detect_ripples_mne_standard
-from MultiChannelLoader import MultiChannelLoader, load_single_channel
-from annotation import (AnnotationManager, AnnotationWidget, add_right_click_annotation, AnnotationControls,  add_drag_to_mark_annotation)
-from signal_processing import SignalProcessingWorker
-from dialogs import (FilterDialog, ChannelSelectionDialog, RippleDetectionDialog, 
-                     ExportDialog, ProgressDialog, PreprocessingDialog, DownsampleDialog)
+import traceback
 
-# Import the new combined dialog
-from dialogs import MultiChannelDownsampleDialog
-from sleep_scoring_dialog import SleepScoringDialog
-from ripple_detection import find_ripples_karlsson
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QSplitter, QListWidget, QListWidgetItem,
+    QTableWidget, QTableWidgetItem, QStackedWidget,
+    QMessageBox, QDialog, QProgressDialog, QSizePolicy
+)
+from PyQt5.QtCore import Qt, QThread
+from PyQt5.QtGui import QFont
+
 import pyqtgraph as pg
 import numpy as np
-import traceback
-from scipy import signal
 
+# Local modules
+from PlotManager import PlotManager
+from MultiChannelLoader import MultiChannelLoader
+from annotation import (
+    AnnotationManager, AnnotationWidget, AnnotationControls,
+    add_drag_to_mark_annotation
+)
+from dialogs import ChannelSelectionDialog, PreprocessingDialog
+from workers import PreprocessingWorker
+from comparison_view import comparison_view
+from sleep_scoring_mixin import SleepScoringMixin
+from data_loader import DataLoader
 
-class DownsampleWorker(QObject):
-    """Worker for downsampling operations"""
-    progress_updated = pyqtSignal(int, str)
-    processing_completed = pyqtSignal(object, object, object)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.data = None
-        self.target_fs = None
-        self.original_fs = None
-        self.original_timestamps = None
-        self.worker = None
-        self.worker_thread = None
-        self.progress_dialog = None
-        QApplication.processEvents()
-    
-    def set_data(self, data, target_fs, original_fs, original_timestamps):
-        self.data = data
-        self.target_fs = target_fs
-        self.original_fs = original_fs
-        self.original_timestamps = original_timestamps
-    
-    def run(self):
-        try:
-            import mne
-            
-            self.progress_updated.emit(20, "Creating MNE object...")
-            
-            # Handle multichannel data
-            if self.data.ndim == 1:
-                n_channels = 1
-                data_for_mne = self.data.reshape(1, -1)
-                info = mne.create_info(['CH1'], self.original_fs, ['seeg'])
-            else:
-                n_channels = self.data.shape[1]
-                data_for_mne = self.data.T  # MNE expects channels x samples
-                ch_names = [f'CH{i+1}' for i in range(n_channels)]
-                info = mne.create_info(ch_names, self.original_fs, ['seeg'] * n_channels)
-            
-            raw = mne.io.RawArray(data_for_mne, info, verbose=False)
-            
-            self.progress_updated.emit(60, "Downsampling...")
-            raw_downsampled = raw.copy().resample(self.target_fs, verbose=False)
-            downsampled_data = raw_downsampled.get_data().T  # Convert back to samples x channels
-            
-            self.progress_updated.emit(90, "Creating timestamps...")
-            
-            if self.original_timestamps is not None:
-                start_time = self.original_timestamps[0]
-                end_time = self.original_timestamps[-1]
-                new_timestamps = np.linspace(start_time, end_time, len(downsampled_data))
-            else:
-                new_timestamps = np.arange(len(downsampled_data)) / self.target_fs
-            
-            self.progress_updated.emit(100, "Complete!")
-            
-            new_header = {'sampleRate': self.target_fs}
-            self.processing_completed.emit(downsampled_data, new_timestamps, new_header)
-            
-        except Exception as e:
-            self.error_occurred.emit(f"Downsampling failed: {str(e)}")
-
-class PreprocessingWorker(QObject):
-    """Worker for preprocessing operations with comparison output"""
-    
-    progress_updated = pyqtSignal(int, str)
-    processing_completed = pyqtSignal(object, object, object, object, list, int, int)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.data = None
-        self.header = None
-        self.timestamps = None
-        self.params = None
-        self.is_cancelled = False
-        self.mutex = QMutex()
-    
-    def set_data(self, data, header, timestamps, params):
-        self.data = data
-        self.header = header
-        self.timestamps = timestamps
-        self.params = params
-        self.is_cancelled = False
-    
-    def cancel(self):
-        self.mutex.lock()
-        self.is_cancelled = True
-        self.mutex.unlock()
-    
-    def run(self):
-        try:
-            if self.is_cancelled:
-                return
-            
-            channels = self.params['channels'][:4]
-            
-            self.progress_updated.emit(5, "Initializing preprocessing...")
-            QApplication.processEvents() 
-            
-            # Get raw data
-            if self.data.ndim > 1:
-                if len(channels) == 1:
-                    raw_data = self.data[:, channels[0]].reshape(-1, 1)
-                else:
-                    raw_data = self.data[:, channels]
-            else:
-                raw_data = self.data.reshape(-1, 1)
-            
-            raw_timestamps = self.timestamps[:len(raw_data)]
-            original_fs = self.params['original_fs']
-            target_fs = self.params['target_fs']
-            
-            self.progress_updated.emit(10, f"Processing {len(channels)} channels...")
-            QApplication.processEvents()
-            # Process each channel
-            processed_channels = []
-            total_channels = raw_data.shape[1]
-            
-            for i in range(total_channels):
-                if self.is_cancelled:
-                    return
-                
-                progress = 10 + (i * 70 // total_channels)
-                self.progress_updated.emit(progress, f"Processing channel {i+1}/{total_channels}...")
-                QApplication.processEvents()
-                ch_data = raw_data[:, i]
-                
-                try:
-                    processed_data = self._process_with_mne(ch_data, original_fs, target_fs, i)
-                    processed_channels.append(processed_data)
-                    QApplication.processEvents()
-                except Exception as e:
-                    self.error_occurred.emit(f"Error processing channel {i+1}: {str(e)}")
-                    return
-                
-                QThread.msleep(50)
-                QApplication.processEvents()
-            
-            if self.is_cancelled:
-                return
-            
-            self.progress_updated.emit(85, "Finalizing processed data...")
-            
-            # Combine processed channels
-            if len(processed_channels) > 1:
-                proc_data = np.column_stack(processed_channels)
-            else:
-                proc_data = processed_channels[0].reshape(-1, 1)
-            
-            # Create timestamps for processed data (preserving absolute timing)
-            if self.timestamps is not None:
-                start_time = self.timestamps[0]
-                end_time = self.timestamps[-1]
-                proc_timestamps = np.linspace(start_time, end_time, len(proc_data))
-            else:
-                proc_timestamps = np.arange(len(proc_data)) / target_fs
-            
-            # Get channel names
-            if 'channel_files' in self.header and self.header['channel_files']:
-                channel_names = [self.header['channel_files'][i] for i in channels]
-            else:
-                channel_names = [f"CH{i+1}" for i in channels]
-            
-            self.progress_updated.emit(100, "Processing complete!")
-            
-            # Emit results
-            self.processing_completed.emit(
-                raw_data, raw_timestamps, proc_data, proc_timestamps, 
-                channel_names, original_fs, target_fs
-            )
-            
-        except Exception as e:
-            self.error_occurred.emit(f"Processing failed: {str(e)}")
-    
-    def _process_with_mne(self, data, original_fs, target_fs, channel_idx):
-        try:
-            import mne
-            from mne.filter import notch_filter
-            
-            # Create MNE raw object
-            info = mne.create_info([f'CH{channel_idx+1}'], original_fs, ['seeg'])
-            raw = mne.io.RawArray(data.reshape(1, -1), info, verbose=False)
-            
-            # Resample if needed (this should be minimal since we're already downsampled)
-            if target_fs != original_fs:
-                raw = raw.copy().resample(target_fs, verbose=False)
-            
-            # Apply notch filter if enabled
-            if self.params['notch_enabled']:
-                raw._data[0] = notch_filter(
-                    raw._data[0], target_fs, freqs=[50], 
-                    method='fir', phase='zero', verbose=False
-                )
-            
-            # Apply bandpass filter if enabled
-            if self.params['bandpass_enabled']:
-                raw = raw.copy().filter(
-                    l_freq=self.params['low_cutoff'],
-                    h_freq=self.params['high_cutoff'],
-                    method='fir', phase='zero', verbose=False
-                )
-            
-            return raw._data[0]
-            
-        except Exception as e:
-            raise Exception(f"MNE processing failed: {str(e)}")
-
-class OpenEphysMainWindow(QMainWindow):
+class OpenEphysMainWindow(QMainWindow, comparison_view, SleepScoringMixin, DataLoader):
     """Main application window with complete downsample + preprocess workflow"""
     
     def __init__(self):
@@ -495,81 +284,9 @@ class OpenEphysMainWindow(QMainWindow):
         info_layout.addWidget(self.info_table)
         
         self.splitter.addWidget(info_widget)
-        self.sleep_legend = self.create_sleep_scoring_legend()
+        self.sleep_legend = self.create_sleep_scoring_legend_widget()
         info_layout.addWidget(self.sleep_legend)
         
-    def create_sleep_scoring_legend(self):
-        """Create a compact sleep scoring color legend widget"""
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel, QFrame
-        from PyQt5.QtGui import QFont, QPalette, QColor
-        from PyQt5.QtCore import Qt
-        
-        legend_widget = QWidget()
-        legend_widget.setMaximumHeight(200)
-        legend_layout = QVBoxLayout(legend_widget)
-        legend_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Title
-        title = QLabel("Sleep State Color Legend")
-        title.setFont(QFont("Arial", 12, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("padding: 3px; background: #f0f8ff; border: 1px solid #ccc;")
-        legend_layout.addWidget(title)
-        
-        # Color grid
-        colors_group = QWidget()
-        colors_layout = QGridLayout(colors_group)
-        colors_layout.setSpacing(3)
-        colors_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # State definitions (from sleep_scoring_dialog.py)
-        STATE_COLORS = {
-            0: (220, 220, 220, 100),  # Unscored - Light Grey
-            1: (200, 230, 200, 120),  # Awake - Soft Green
-            3: (200, 220, 240, 120),  # Non-REM - Soft Blue
-            5: (240, 210, 220, 120),  # REM - Soft Pink
-            4: (230, 210, 240, 120)   # Intermediate - Soft Purple
-        }
-        
-        STATE_NAMES = {
-            0: 'Unscored',
-            1: 'Awake',
-            3: 'Non-REM',
-            5: 'REM',
-            4: 'Intermediate'
-        }
-        
-        row = 0
-        for state_code in sorted(STATE_COLORS.keys()):
-            color = STATE_COLORS[state_code]
-            name = STATE_NAMES[state_code]
-            
-            # Color square
-            color_square = QFrame()
-            color_square.setFixedSize(20, 20)
-            color_square.setFrameStyle(QFrame.Box | QFrame.Plain)
-            color_square.setLineWidth(1)
-            
-            palette = color_square.palette()
-            palette.setColor(QPalette.Window, QColor(color[0], color[1], color[2], color[3]))
-            color_square.setPalette(palette)
-            color_square.setAutoFillBackground(True)
-            
-            colors_layout.addWidget(color_square, row, 0)
-            
-            # State name
-            name_label = QLabel(name)
-            name_label.setFont(QFont("Arial", 12))
-            name_label.setStyleSheet("padding: 2px;")
-            colors_layout.addWidget(name_label, row, 1)
-            
-            row += 1
-        
-        legend_layout.addWidget(colors_group)
-        legend_layout.addStretch()
-        
-        return legend_widget
-    
     
     def create_menus(self):
         """Create simplified menu bar - File, Edit, View, Plot only"""
@@ -703,199 +420,11 @@ class OpenEphysMainWindow(QMainWindow):
             self.update_info_panel()
             self.plot_data()
             self.filtered_list.clearSelection()
-    
-    def load_single_file(self):
-        """Load single .continuous file with immediate downsample dialog"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 'Select .continuous file',
-            filter="Continuous files (*.continuous)"
-        )
-        
-        if not file_path:
-            return
-        
-        try:
-            # Load file
-            result = load_single_channel(file_path, verbose=True)
-            data = result['data']
-            timestamps = result['timestamps']
-            header = result['header']
-
-            # Ensure timestamps start at zero
-            if timestamps is not None and len(timestamps) > 0 and timestamps[0] != 0:
-                print(f"Adjusting timestamps: original start = {timestamps[0]:.3f}s")
-                timestamps = timestamps - timestamps[0]
-                print(f"New timestamp range: {timestamps[0]:.3f}s to {timestamps[-1]:.3f}s")
-            print(f"Loaded file: {len(data)} samples at {header.get('sampleRate', 'Unknown')} Hz")
-            
-            # Show downsample dialog immediately
-            self.show_downsample_dialog(data, header, timestamps, file_path)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Load Error", f"Failed to load file:\n{str(e)}")
-            traceback.print_exc()
-    
-    def show_downsample_dialog(self, data, header, timestamps, file_path):
-        """Show downsample dialog and handle downsampling"""
-        dialog = DownsampleDialog(data, header, timestamps, file_path, self)
-        
-        if dialog.exec_() == QDialog.Accepted:
-            target_fs = dialog.get_target_frequency()
-            if target_fs is None:  # Invalid frequency
-                return
-                
-            original_fs = header.get('sampleRate', 20000)
-            
-            print(f"Starting downsample from {original_fs:.0f}Hz to {target_fs:.0f}Hz")
-            
-            # Start downsampling
-            self.start_downsampling(data, target_fs, original_fs, timestamps, file_path)
-    
-    def start_downsampling(self, data, target_fs, original_fs, timestamps, file_path):
-        """Start downsampling with proper cleanup check"""
-        try:
-            # CRITICAL: Ensure clean state
-            self.cleanup_worker_thread()
-            
-            # Verify we have clean state
-            if self.worker_thread is not None:
-                print("ERROR: Thread not cleaned up properly")
-                return
-            
-            self.progress_dialog = QProgressDialog("Downsampling data...", "Cancel", 0, 100, self)
-            self.progress_dialog.setWindowModality(Qt.WindowModal)
-            self.progress_dialog.show()
-            
-            # Create NEW worker and thread objects
-            self.worker = DownsampleWorker()
-            self.worker.set_data(data, target_fs, original_fs, timestamps)
-            
-            self.worker_thread = QThread()  # Fresh new thread
-            self.worker.moveToThread(self.worker_thread)
-            
-            # Connect signals
-            self.worker_thread.started.connect(self.worker.run)
-            self.worker.progress_updated.connect(self.update_progress)
-            self.worker.processing_completed.connect(
-                lambda d, t, h: self.on_downsample_complete(d, t, h, file_path, data.shape[1] if data.ndim > 1 else 1)
-            )
-            self.worker.error_occurred.connect(self.on_downsample_error)
-            
-            # Cleanup connections
-            self.worker.processing_completed.connect(self.worker_thread.quit)
-            self.worker.error_occurred.connect(self.worker_thread.quit)
-            
-            self.worker_thread.start()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Downsample Error", f"Failed to start:\n{str(e)}")
-    
-    def update_progress(self, value, message):
-        """Update progress dialog"""
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.setValue(value)
-            self.progress_dialog.setLabelText(message)
-            QApplication.processEvents()
-
-    def on_downsample_complete(self, data, timestamps, header, file_path, n_channels=1):
-        """Handle downsample completion - preserve multichannel structure"""
-        try:
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.close()
-                self.progress_dialog = None
-            
-            filename = os.path.basename(file_path)
-            name = filename.replace('.continuous', '')
-            
-            # Preserve multichannel structure
-            if n_channels > 1:
-                if data.ndim == 1:
-                    data = data.reshape(-1, n_channels)
-                name = f"Multi-channel ({n_channels} channels)"
-                
-                # Restore channel names from stored header
-                if hasattr(self, '_multichannel_header'):
-                    if 'channel_files' in self._multichannel_header:
-                        header['channel_files'] = self._multichannel_header['channel_files']
-                        header['channel_count'] = self._multichannel_header.get('channel_count', n_channels)
-                    delattr(self, '_multichannel_header')
-            elif data.ndim == 1:
-                data = data.reshape(-1, 1)
-            
-            dataset = {
-                "name": name,
-                "data": data,
-                "header": header,
-                "file_path": file_path,
-                "timestamps": timestamps
-            }
-            
-            self.add_dataset(dataset)
-            
-            QMessageBox.information(self, "Ready for Analysis", 
-                                f"Data ready at {header['sampleRate']:.0f}Hz\n"
-                                f"Channels: {data.shape[1]}\n"
-                                f"Samples: {len(data):,}\n"
-                                f"Duration: {timestamps[-1] - timestamps[0]:.1f}s\n\n"
-                                f"Use Edit → Preprocess to apply filters")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Complete Error", f"Failed to complete downsampling:\n{str(e)}")
-        
-    def on_downsample_error(self, error_msg):
-        """Handle downsample error"""
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-        QMessageBox.critical(self, "Downsample Error", error_msg)
-    
-    def cancel_downsampling(self):
-        """Cancel downsampling"""
-        self.cleanup_worker_thread()
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-    
-    def load_multiple_channels(self):
-        """Load multiple .continuous files"""
-        self.multichannel_loader.select_and_load_files(self.on_multichannel_loaded)
-    
-    def on_multichannel_loaded(self, data, timestamps, header, description):
-        """Handle multi-channel data loading completion WITH downsample dialog"""
-        
-        print("\n" + "="*60)
-        print("DEBUG: on_multichannel_loaded() - RECEIVED DATA")
-        print("="*60)
-        print(f"data.shape: {data.shape}")
-        print(f"timestamps.shape: {timestamps.shape}")
-        print(f"description: {description}")
-        print(f"header keys: {list(header.keys()) if isinstance(header, dict) else 'Not a dict'}")
-        if isinstance(header, dict) and 'channel_files' in header:
-            print(f"channel_files value: {header['channel_files']}")
-        print("="*60 + "\n")
-        
-        try:
-            # Ensure timestamps start at zero
-            if timestamps is not None and len(timestamps) > 0 and timestamps[0] != 0:
-                timestamps = timestamps - timestamps[0]
-            
-            # Store for use in downsample completion
-            self._multichannel_header = header
-            
-            # Show downsample dialog
-            self.show_downsample_dialog(data, header, timestamps, description)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to process multi-channel data:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
             
     def add_dataset(self, dataset):
         """Add dataset to the list"""
         self.datasets.append(dataset)
         print("\n" + "="*50)
-        print("DATASET ADDED - DEBUG INFO")
-        print("="*50)
         print(f"Name: {dataset['name']}")
         print(f"Data shape: {dataset['data'].shape}")
         print(f"Sample count: {len(dataset['data'])}")
@@ -960,9 +489,9 @@ class OpenEphysMainWindow(QMainWindow):
             
             self.update_info_panel()
             self.datasets_list.clearSelection()
+            
     def preprocess_data(self):
         """Open preprocessing dialog - FIXED VERSION"""
-        print("PREPROCESS_DATA METHOD CALLED!")
         import sys
         import traceback
         from datetime import datetime
@@ -997,7 +526,7 @@ class OpenEphysMainWindow(QMainWindow):
         if hasattr(self, 'comparison_plot_widget') and self.comparison_plot_widget is not None:
             # Clear the plot contents
             self.comparison_plot_widget.clear()
-            print("✓ Cleared comparison plot")
+            print("Cleared comparison plot")
         
         # Remove existing slider if present
         if hasattr(self, 'comparison_slider_widget') and self.comparison_slider_widget is not None:
@@ -1006,7 +535,7 @@ class OpenEphysMainWindow(QMainWindow):
                     self.comparison_plot_slider_layout.removeWidget(self.comparison_slider_widget)
                 self.comparison_slider_widget.deleteLater()
                 self.comparison_slider_widget = None
-                print("✓ Removed old slider")
+                print("Removed old slider")
             except Exception as e:
                 print(f"Warning: Could not remove slider: {e}")
         
@@ -1146,7 +675,7 @@ class OpenEphysMainWindow(QMainWindow):
                 real_channel_names, original_fs, target_fs,
                 raw_thresholds=raw_thresholds, proc_thresholds=proc_thresholds
             )
-            print("✓ Comparison view created")
+            print("Comparison view created")
             
             # Store processed data in sidebar
             dataset = {
@@ -1164,7 +693,7 @@ class OpenEphysMainWindow(QMainWindow):
             item = QListWidgetItem(dataset['name'])
             item.setData(Qt.UserRole, dataset)
             self.filtered_list.addItem(item)
-            print("✓ Added to filtered list")
+            print("Added to filtered list")
             
             QMessageBox.information(self, "Preprocessing Complete", 
                                 f"Processing successful!\n\n"
@@ -1186,7 +715,7 @@ class OpenEphysMainWindow(QMainWindow):
                 'channel_files' in self.datasets[self.current_index]['header']):
                 
                 files = self.datasets[self.current_index]['header']['channel_files']
-                print(f"✓ Found channel files in header: {files}")  # ADDED
+                print(f"Found channel files in header: {files}")  # ADDED
                 
                 for i in range(min(num_channels, len(files))):
                     filename = files[i]
@@ -1196,7 +725,7 @@ class OpenEphysMainWindow(QMainWindow):
                     
             elif 'channel_files' in self.current_header:
                 files = self.current_header['channel_files']
-                print(f"✓ Found channel files in current header: {files}")  # ADDED
+                print(f" Found channel files in current header: {files}")  # ADDED
                 
                 for i in range(min(num_channels, len(files))):
                     filename = files[i]
@@ -1212,19 +741,8 @@ class OpenEphysMainWindow(QMainWindow):
             for i in range(len(real_names), num_channels):
                 real_names.append(f"CH{i+1}")
         
-        print(f"✓ Final channel names: {real_names}")  # ADDED
+        print(f"Final channel names: {real_names}")  # ADDED
         return real_names[:num_channels]
-    
-    def cleanup_worker_thread(self):
-        """Clean up existing worker thread"""
-        if self.worker_thread and self.worker_thread.isRunning():
-            if self.worker:
-                self.worker.cancel()
-            self.worker_thread.quit()
-            self.worker_thread.wait(3000)
-            if self.worker_thread.isRunning():
-                self.worker_thread.terminate()
-                self.worker_thread.wait()
     
     def update_robust_progress(self, percentage, message):
         """Update progress dialog"""
@@ -1256,285 +774,6 @@ class OpenEphysMainWindow(QMainWindow):
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
-    
-    def create_comparison_view(self, raw_data, raw_timestamps, proc_data, proc_timestamps, 
-                          channel_names, original_fs, target_fs, raw_thresholds=None, proc_thresholds=None):
-        """Create comparison view with amplitude control support - FULLY FIXED VERSION"""
-        
-        try:
-            QApplication.processEvents()
-            
-            if not hasattr(self, 'comparison_page'):
-                self.comparison_page = QWidget()
-                main_layout = QVBoxLayout(self.comparison_page)
-                main_layout.setContentsMargins(0, 0, 0, 0)
-                
-                # ==================================================================
-                # CREATE THE PLOT WIDGET FIRST (before referencing it!)
-                # ==================================================================
-                self.comparison_plot_widget = pg.PlotWidget()
-                self.comparison_plot_widget.setBackground('w')
-                self.comparison_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-                self.comparison_plot_widget.setLabel('bottom', 'Time (seconds)', units='')
-                self.comparison_plot_widget.setTitle("Before/After Preprocessing Comparison")
-                
-                # Performance optimizations
-                self.comparison_plot_widget.setClipToView(True)
-                self.comparison_plot_widget.setDownsampling(auto=True, mode='peak')
-                self.comparison_plot_widget.setMouseEnabled(x=True, y=True)
-                self.comparison_plot_widget.getPlotItem().setClipToView(True)
-                
-                # ==================================================================
-                # CREATE RESIZABLE SPLITTER with correct configuration
-                # ==================================================================
-                self.comparison_splitter = QSplitter(Qt.Vertical)
-                self.comparison_splitter.setHandleWidth(5)  # Make handle visible
-                self.comparison_splitter.setChildrenCollapsible(False)  # Prevent collapsing
-                
-                # ==================================================================
-                # TOP SECTION: Container for plot + slider
-                # ==================================================================
-                plot_and_slider_container = QWidget()
-                plot_and_slider_container.setSizePolicy(
-                    QSizePolicy.Expanding, 
-                    QSizePolicy.Expanding  # Allow resizing
-                )
-                plot_slider_layout = QVBoxLayout(plot_and_slider_container)
-                plot_slider_layout.setContentsMargins(0, 0, 0, 0)
-                plot_slider_layout.setSpacing(0)
-                
-                # Add plot to container
-                plot_slider_layout.addWidget(self.comparison_plot_widget)
-                
-                # Store layout reference for slider addition later
-                self.comparison_plot_slider_layout = plot_slider_layout
-                
-                # ==================================================================
-                # BOTTOM SECTION: Annotation panel
-                # ==================================================================
-                annotation_panel = QWidget()
-                annotation_panel.setSizePolicy(
-                    QSizePolicy.Expanding,
-                    QSizePolicy.Expanding  # Allow resizing
-                )
-                annotation_layout = QVBoxLayout(annotation_panel)
-                
-                controls = AnnotationControls(self.annotation_manager, self)
-                annotation_layout.addLayout(controls)
-                
-                self.comparison_annotation_widget = AnnotationWidget(self.annotation_manager)
-                annotation_layout.addWidget(self.comparison_annotation_widget)
-                
-                # ==================================================================
-                # ADD BOTH SECTIONS TO SPLITTER
-                # ==================================================================
-                self.comparison_splitter.addWidget(plot_and_slider_container)  # Top
-                self.comparison_splitter.addWidget(annotation_panel)           # Bottom
-                
-                # Set initial sizes (70% plot area, 30% annotations)
-                self.comparison_splitter.setSizes([700, 300])
-                
-                # Set stretch factors (both can resize)
-                self.comparison_splitter.setStretchFactor(0, 7)  # Top section gets 70%
-                self.comparison_splitter.setStretchFactor(1, 3)  # Bottom section gets 30%
-                
-                # Style the splitter handle to make it visible
-                self.comparison_splitter.setStyleSheet("""
-                    QSplitter::handle {
-                        background-color: #cccccc;
-                        border: 1px solid #999999;
-                    }
-                    QSplitter::handle:hover {
-                        background-color: #1f77b4;
-                    }
-                    QSplitter::handle:vertical {
-                        height: 5px;
-                    }
-                """)
-                
-                # Add splitter to main layout
-                main_layout.addWidget(self.comparison_splitter)
-                
-                # Add to content stack
-                self.content_stack.addWidget(self.comparison_page)
-            
-            # Switch to comparison view
-            self.content_stack.setCurrentWidget(self.comparison_page)
-            
-            # Setup drag annotator if not exists
-            if not hasattr(self, 'comparison_drag_annotator'):
-                self.comparison_drag_annotator = add_drag_to_mark_annotation(
-                    self.comparison_plot_widget, self.annotation_manager
-                )
-            
-            # Clear existing plots
-            self.comparison_plot_widget.clear()
-            
-            # Store data for controls and amplitude scaling
-            self.comparison_raw_data = raw_data
-            self.comparison_raw_timestamps = raw_timestamps
-            self.comparison_proc_data = proc_data
-            self.comparison_proc_timestamps = proc_timestamps
-            self.comparison_channel_names = channel_names
-            
-            n_channels = min(len(channel_names), raw_data.shape[1], proc_data.shape[1])
-            colors = ['black', '#ff7f0e', '#2ca02c', '#d62728']
-            
-            # Calculate spacing
-            all_data = np.concatenate([raw_data[:, :n_channels], proc_data[:, :n_channels]], axis=1)
-            max_range = np.max(np.ptp(all_data, axis=0))
-            self.comparison_spacing = max_range * 2
-            
-            # Store base normalized data for amplitude scaling
-            self.comparison_raw_normalized = []
-            self.comparison_proc_normalized = []
-            self.comparison_raw_curves = []
-            self.comparison_proc_curves = []
-            
-            # Plot BEFORE (top) - store curves
-            for i in range(n_channels):
-                y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
-                
-                ch_data = raw_data[:, i]
-                normalized_base = (ch_data / np.ptp(ch_data)) * self.comparison_spacing * 0.8
-                self.comparison_raw_normalized.append(normalized_base)
-                
-                normalized = normalized_base + y_offset
-                pen = pg.mkPen(color=colors[i % len(colors)], width=1)
-                
-                curve = self.comparison_plot_widget.plot(
-                    raw_timestamps, normalized, 
-                    pen=pen,
-                    antialias=False,
-                    clipToView=True,
-                    autoDownsample=True,
-                    downsampleMethod='peak'
-                )
-                self.comparison_raw_curves.append(curve)
-            
-            # Separator
-            separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
-            pen_sep = pg.mkPen(color='gray', width=3, style=Qt.SolidLine)
-            self.comparison_separator = self.comparison_plot_widget.plot(
-                [raw_timestamps[0], raw_timestamps[-1]], 
-                [separator_y, separator_y], 
-                pen=pen_sep
-            )
-            
-            # Plot AFTER (bottom) - store curves
-            for i in range(n_channels):
-                y_offset = (n_channels - 1 - i) * self.comparison_spacing
-                
-                ch_data = proc_data[:, i]
-                normalized_base = (ch_data / np.ptp(ch_data)) * self.comparison_spacing * 0.8
-                self.comparison_proc_normalized.append(normalized_base)
-                
-                normalized = normalized_base + y_offset
-                pen = pg.mkPen(color=colors[i % len(colors)], width=1, style=Qt.SolidLine)
-                
-                curve = self.comparison_plot_widget.plot(
-                    proc_timestamps, normalized,
-                    pen=pen,
-                    antialias=False,
-                    clipToView=True,
-                    autoDownsample=True,
-                    downsampleMethod='peak'
-                )
-                self.comparison_proc_curves.append(curve)
-                
-                # ★ ADD THRESHOLD LINE FOR AFTER (processed) using Karlsson method ★
-                if proc_thresholds and i < len(proc_thresholds):
-                    threshold_value = proc_thresholds[i]
-                    
-                    # Calculate envelope for proper scaling
-                    from scipy.signal import hilbert
-                    envelope = np.abs(hilbert(ch_data))
-                    envelope_ptp = np.ptp(envelope)
-                    
-                    if envelope_ptp > 0:
-                        threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8 + y_offset
-                        
-                        # Plot threshold as red dashed line
-                        pen_thresh = pg.mkPen(color='red', width=1, style=Qt.SolidLine)
-                        thresh_line = self.comparison_plot_widget.plot(
-                            [proc_timestamps[0], proc_timestamps[-1]], 
-                            [threshold_normalized, threshold_normalized],
-                            pen=pen_thresh
-                        )
-                        
-                        # Add threshold label
-                        text_label = pg.TextItem(
-                            text=f"Thresh (3σ): {threshold_value:.2f}",
-                            color=(255, 0, 0),
-                            anchor=(0, 0.5),
-                            fill=(255, 255, 255, 200)
-                        )
-                        text_label.setPos(proc_timestamps[0] + (proc_timestamps[-1] - proc_timestamps[0]) * 0.02, threshold_normalized + self.comparison_spacing * 0.15)
-                        self.comparison_plot_widget.addItem(text_label)
-
-        # Add channel name labels on Y-axis
-            # Add channel name labels on Y-axis
-            y_axis = self.comparison_plot_widget.getAxis('left')
-            ticks = []
-
-            # BEFORE section (top)
-            for i in range(n_channels):
-                y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
-                ticks.append((y_offset, f"{channel_names[i]} (Before)"))
-
-            # Separator
-            separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
-            ticks.append((separator_y, ""))
-
-            # AFTER section (bottom)
-            for i in range(n_channels):
-                y_offset = (n_channels - 1 - i) * self.comparison_spacing
-                ticks.append((y_offset, f"{channel_names[i]} (After)"))
-
-            y_axis.setTicks([ticks])
-            y_axis.setLabel('')
-            y_axis.setTextPen(pg.mkPen(color='#999999')) 
-            y_axis.setPen(pg.mkPen(color='#CCCCCC', width=1))  
-            
-            x_axis = self.comparison_plot_widget.getAxis('bottom')
-            x_axis.enableAutoSIPrefix(False)
-            x_axis.setLabel('Time (seconds)', units='')
-            
-            # Set ranges
-            n_channels = len(self.comparison_raw_normalized)
-            total_height = (n_channels * 2 + 1) * self.comparison_spacing
-            self.comparison_plot_widget.setYRange(-self.comparison_spacing, total_height, padding=0.1)
-            
-            time_start = min(raw_timestamps[0], proc_timestamps[0])
-            time_end = max(raw_timestamps[-1], proc_timestamps[-1])
-            self.comparison_plot_widget.setXRange(time_start, time_end, padding=0.02)
-            
-            # Setup controls
-            self._setup_comparison_controls()
-            if self.sleep_scoring_data is not None:
-                print("Adding sleep scoring to comparison view...")
-                self.add_sleep_scoring_to_comparison()
-    
-            QApplication.processEvents()
-            print("✓✓✓ Comparison view created with RESIZABLE splitter!")
-            
-        except Exception as e:
-            import traceback
-            from datetime import datetime
-            
-            error_msg = f"Error creating comparison view: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)
-            
-            # Log to file
-            try:
-                with open('app_errors.log', 'a') as f:
-                    f.write(f"[{datetime.now()}] {error_msg}\n")
-            except:
-                pass
-            
-            QMessageBox.critical(self, "Error", 
-                f"Failed to create comparison view:\n{str(e)}\n\n"
-                "Check app_errors.log for details.")
 
     def close_dataset(self):
         """Close current dataset and allow loading new data"""
@@ -1588,61 +827,7 @@ class OpenEphysMainWindow(QMainWindow):
                         self.datasets_list.setCurrentRow(0)
                 
                 self.update_ui_state()
-                print("✓ Dataset closed - ready for new data")
-
-    def close_dataset(self):
-        """Close current dataset and allow loading new data"""
-        if self.current_index >= 0:
-            reply = QMessageBox.question(
-                self, "Close Dataset",
-                "Close current dataset and clear all data?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            
-            if reply == QMessageBox.Yes:
-                # Clean up threading first
-                self.cleanup_worker_thread()
-                
-                # Clear current dataset
-                current_item = self.datasets_list.currentItem()
-                if current_item:
-                    row = self.datasets_list.row(current_item)
-                    self.datasets_list.takeItem(row)
-                    self.datasets.pop(self.current_index)
-                    
-                    # Update indices
-                    for i in range(self.datasets_list.count()):
-                        item = self.datasets_list.item(i)
-                        if item.data(Qt.UserRole) > self.current_index:
-                            item.setData(Qt.UserRole, item.data(Qt.UserRole) - 1)
-                
-                # Reset state
-                self.current_index = -1
-                self.current_data = None
-                self.current_header = None
-                
-                # Clear filtered data
-                self.filtered_list.clear()
-                self.filtered_datasets = []
-                
-                # Reset UI
-                if len(self.datasets) == 0:
-                    self.content_stack.setCurrentWidget(self.empty_page)
-                    self.sidebar_widget.hide()
-                    self.splitter.widget(2).hide()  # Hide info panel
-                    self.clear_info_panel()
-                    
-                    # Clear plots
-                    if hasattr(self, 'plot_widget'):
-                        self.plot_widget.clear()
-                    if hasattr(self, 'comparison_plot_widget'):
-                        self.comparison_plot_widget.clear()
-                else:
-                    if self.datasets_list.count() > 0:
-                        self.datasets_list.setCurrentRow(0)
-                
-                self.update_ui_state()
-                print("✓ Dataset closed - ready for new data")
+                print(" Dataset closed - ready for new data")
 
     def reset_application_state(self):
         """Complete application reset"""
@@ -1677,14 +862,12 @@ class OpenEphysMainWindow(QMainWindow):
             self.removeToolBar(self.zoom_toolbar)
         if hasattr(self, 'comparison_toolbar'):
             self.removeToolBar(self.comparison_toolbar)
-        
         self.update_ui_state()
-    
-    # Force garbage collection
-    import gc
-    gc.collect()
-    
-    print("✓ Application reset complete")
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        print("Application reset complete")
     
     def plot_data(self):
         """Plot current dataset"""
@@ -1792,193 +975,7 @@ class OpenEphysMainWindow(QMainWindow):
         if hasattr(self, 'actionRippleDetect'):
             self.actionRippleDetect.setEnabled(has_data)
         self.actionLoadSleepScoring.setEnabled(has_data)
-    
-        print(f"DEBUG: Preprocess menu enabled = {self.actionPreprocess.isEnabled()}")
-    def load_sleep_scoring(self):
-        """Load sleep scoring data from .mat file"""
-        if self.current_data is None:
-            QMessageBox.warning(self, "No Data", 
-                              "Please load neural data first before loading sleep scoring.")
-            return
-        
-        # Get duration and sampling rate from current data
-        if self.current_index >= 0:
-            timestamps = self.datasets[self.current_index]["timestamps"]
-            if timestamps is not None:
-                duration = timestamps[-1] - timestamps[0]
-            else:
-                duration = len(self.current_data) / self.current_header.get('sampleRate', 1000)
-        else:
-            duration = len(self.current_data) / self.current_header.get('sampleRate', 1000)
-        
-        fs = self.current_header.get('sampleRate', 1000)
-        
-        # Open dialog
-        dialog = SleepScoringDialog(
-            neural_data_duration=duration,
-            neural_fs=fs,
-            parent=self 
-    )
-        
-        if dialog.exec_() == QDialog.Accepted:
-            self.sleep_scoring_data = dialog.get_sleep_scoring_data()
-            
-            if self.sleep_scoring_data:
-                unique_states = len(np.unique(self.sleep_scoring_data['states']))
-                QMessageBox.information(
-                    self, "Sleep Scoring Loaded",
-                    f"Sleep scoring loaded successfully!\n\n"
-                f"Duration: {duration:.1f} seconds\n"
-                    f"States: {unique_states} unique states\n\n"
-                f"Sleep scoring will appear in comparison view when you preprocess data."           
-                )
-            
-            
-                print(f"Sleep scoring loaded: {len(self.sleep_scoring_data['states'])} samples")
 
-    def add_sleep_scoring_to_comparison(self):
-        """Add sleep scoring track to comparison view"""
-        if self.sleep_scoring_data is None or not hasattr(self, 'comparison_plot_widget'):
-            return
-        
-        try:
-            states = self.sleep_scoring_data['states']
-            state_names = self.sleep_scoring_data['state_names']
-            
-            # Create timestamps for sleep scoring
-            if hasattr(self, 'comparison_raw_timestamps') and self.comparison_raw_timestamps is not None:
-                # Align with neural data timestamps
-                fs = self.sleep_scoring_data.get('sampling_rate', 1000)
-                timestamps = np.linspace(
-                    self.comparison_raw_timestamps[0],
-                    self.comparison_raw_timestamps[-1],
-                    len(states)
-                )
-            else:
-                fs = self.sleep_scoring_data.get('sampling_rate', 1000)
-                timestamps = np.arange(len(states)) / fs
-            
-            # Define colors for each state (RGBA format)
-            state_colors = {
-               0: (220, 220, 220, 100),  # Unscored - Light Grey
-               
-                1: (200, 230, 200, 120),  # Awake - Soft Green
-                3: (200, 220, 240, 120),  # Non-REM - Soft Blue
-                5: (240, 210, 220, 120),  # REM - Soft Pink
-                4: (230, 210, 240, 120)   # Intermediate - Soft Purple
-            }
-            # Calculate y-position for sleep scoring track
-            n_channels = len(self.comparison_channel_names) if hasattr(self, 'comparison_channel_names') else 1
-            spacing = self.comparison_spacing if hasattr(self, 'comparison_spacing') else 100
-            
-            # Sleep scoring track at the very top
-            track_height = spacing * 0.8
-            track_y_position = (n_channels * 2 + 3) * spacing
-            
-            # Remove old sleep scoring items if they exist
-            if hasattr(self, 'sleep_scoring_items') and self.sleep_scoring_items:
-                for item in self.sleep_scoring_items:
-                    try:
-                        self.comparison_plot_widget.removeItem(item)
-                    except:
-                        pass
-            
-            self.sleep_scoring_items = []
-            
-            # Plot sleep states as colored rectangles
-            current_state = states[0]
-            start_idx = 0
-            
-            for i in range(1, len(states) + 1):
-                # Check if state changed or end of data
-                if i == len(states) or states[i] != current_state:
-                    # Draw rectangle for this state period
-                    start_time = timestamps[start_idx]
-                    end_time = timestamps[i-1] if i < len(timestamps) else timestamps[-1]
-                    
-                    # Get color for this state
-                    color = state_colors.get(current_state, (128, 128, 128, 100))
-                    
-                    # Create filled rectangle using LinearRegionItem
-                    from pyqtgraph import LinearRegionItem
-                    region = LinearRegionItem(
-                        values=[start_time, end_time],
-                        orientation='vertical',
-                        brush=pg.mkBrush(color),
-                        movable=False,
-                        pen=pg.mkPen(None)
-                    )
-                    
-                    # Set the region to the correct y-range
-                    region.setZValue(-10)  # Behind the data
-                    self.comparison_plot_widget.addItem(region)
-                    self.sleep_scoring_items.append(region)
-                    
-                    # Update for next segment
-                    if i < len(states):
-                        current_state = states[i]
-                        start_idx = i
-            
-            # Add label at the top
-            label_item = pg.TextItem(
-                "Sleep States:",
-                anchor=(0, 0.5),
-                color=(0, 0, 0)
-            )
-            label_item.setFont(QFont("Arial", 10, QFont.Bold))
-            label_item.setPos(timestamps[0], track_y_position + track_height * 0.6)
-            self.comparison_plot_widget.addItem(label_item)
-            self.sleep_scoring_items.append(label_item)
-            
-            # Add legend for states
-            legend_x = timestamps[0] + (timestamps[-1] - timestamps[0]) * 0.02
-            legend_y = track_y_position + track_height * 0.3
-            
-            for state_val, color in state_colors.items():
-                if state_val in np.unique(states):
-                    # Create small colored box
-                    box_width = (timestamps[-1] - timestamps[0]) * 0.015
-                    box = pg.QtGui.QGraphicsRectItem(
-                        legend_x, 
-                        legend_y - track_height * 0.15,
-                        box_width,
-                        track_height * 0.3
-                    )
-                    box.setBrush(pg.mkBrush(color))
-                    box.setPen(pg.mkPen((0, 0, 0), width=1))
-                    self.comparison_plot_widget.addItem(box)
-                    self.sleep_scoring_items.append(box)
-                    
-                    # Add text label
-                    text = pg.TextItem(
-                        state_names.get(state_val, f'State {state_val}'),
-                        anchor=(0, 0.5),
-                        color=(0, 0, 0)
-                    )
-                    text.setPos(legend_x + box_width * 1.5, legend_y)
-                    self.comparison_plot_widget.addItem(text)
-                    self.sleep_scoring_items.append(text)
-                    
-                    # Move to next legend position
-                    legend_x += (timestamps[-1] - timestamps[0]) * 0.12
-            
-            # Update y-axis range to include sleep scoring
-            current_y_range = self.comparison_plot_widget.viewRange()[1]
-            new_max = max(current_y_range[1], track_y_position + track_height * 1.2)
-            self.comparison_plot_widget.setYRange(
-                current_y_range[0], 
-                new_max, 
-                padding=0.05
-            )
-            
-            print("Sleep scoring track added to comparison view")
-            print(f"   States displayed: {np.unique(states)}")
-            print(f"   Duration: {timestamps[-1] - timestamps[0]:.1f} seconds")
-            
-        except Exception as e:
-            print(f"Error adding sleep scoring: {e}")
-            import traceback
-            traceback.print_exc()
     def select_channels(self):
         """Open channel selection dialog"""
         if self.current_data is None:
@@ -2022,458 +1019,9 @@ class OpenEphysMainWindow(QMainWindow):
         self.cleanup_worker_thread()
         super().closeEvent(event)
         
-    def _setup_comparison_controls(self):
-        """Setup zoom controls for comparison view WITH amp controls"""
-        print(f" _setup_comparison_controls called!")
-
-        # FORCEFULLY hide PlotManager's toolbar
-        if hasattr(self, 'plot_manager') and hasattr(self.plot_manager, 'parent'):
-            # Find and hide the zoom toolbar created by PlotManager
-            for toolbar in self.findChildren(QToolBar):
-                # PlotManager creates toolbar with "Zoom" in title
-                if "Zoom" in toolbar.windowTitle() or "Main" in toolbar.windowTitle():
-                    print(f"  → Hiding PlotManager toolbar: {toolbar.windowTitle()}")
-                    toolbar.setVisible(False)
-        
-        # Also hide by direct reference if it exists
-        if hasattr(self, 'zoom_toolbar') and self.zoom_toolbar:
-            print(f"  → Hiding zoom_toolbar directly")
-            self.zoom_toolbar.setVisible(False)
-        
-        # Remove any old comparison toolbars
-        if hasattr(self, 'comparison_toolbar') and self.comparison_toolbar is not None:
-            self.removeToolBar(self.comparison_toolbar)
-            self.comparison_toolbar.deleteLater()
-            self.comparison_toolbar = None
-        
-        # Create toolbar
-        toolbar = QToolBar("Comparison Controls")
-        toolbar.setMovable(False)
-        self.addToolBar(Qt.TopToolBarArea, toolbar)
-        self.comparison_toolbar = toolbar
-        
-        toolbar.setStyleSheet("""
-            QToolBar { 
-                spacing: 8px; 
-                padding: 5px;
-                background: #f5f5f5;
-                border-bottom: 1px solid #ddd;
-            }
-            QPushButton { 
-                padding: 4px 8px;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                background: white;
-                min-width: 70px;
-            }
-            QPushButton:hover {
-                background: #e8f4fd;
-                border: 1px solid #1f77b4;
-            }
-            QComboBox {
-                padding: 4px 8px;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                background: white;
-                min-width: 80px;
-            }
-        """)
-        
-        # Zoom buttons
-        btn = QPushButton("🔍+ Zoom In")
-        btn.clicked.connect(self._comparison_zoom_in)
-        toolbar.addWidget(btn)
-        
-        btn = QPushButton("🔍- Zoom Out")
-        btn.clicked.connect(self._comparison_zoom_out)
-        toolbar.addWidget(btn)
-        
-        btn = QPushButton("Reset")
-        btn.clicked.connect(self._comparison_reset)
-        toolbar.addWidget(btn)
-        
-        toolbar.addSeparator()
-        
-        # AMPLITUDE CONTROLS
-        btn_amp_in = QPushButton("+ Amp")
-        btn_amp_in.clicked.connect(self._comparison_amp_increase)
-        toolbar.addWidget(btn_amp_in)
-        
-        btn_amp_out = QPushButton("- Amp")
-        btn_amp_out.clicked.connect(self._comparison_amp_decrease)
-        toolbar.addWidget(btn_amp_out)
-        
-        # Amplitude scale label
-        self.comparison_amp_label = QLabel("Amp: 1.0x")
-        self.comparison_amp_label.setStyleSheet("""
-            QLabel {
-                color: #333;
-                padding: 4px 8px;
-                background: #fff3cd;
-                border: 1px solid #ffeaa7;
-                border-radius: 3px;
-            }
-        """)
-        toolbar.addWidget(self.comparison_amp_label)
-        
-        toolbar.addSeparator()
-        
-        # Time window dropdown
-        toolbar.addWidget(QLabel("Time Window:"))
-        self.comparison_time_combo = QComboBox()
-        self.comparison_time_combo.addItems([
-            "Full View", "10 min", "5 min", "1 min", "30 sec", "10 sec", 
-            "1 sec", "100 ms", "10 ms"
-        ])
-        self.comparison_time_combo.currentTextChanged.connect(self._comparison_time_window_changed)
-        toolbar.addWidget(self.comparison_time_combo)
-        
-        toolbar.addSeparator()
-        
-        # View info label
-        self.comparison_view_label = QLabel("View: Full")
-        self.comparison_view_label.setStyleSheet("""
-            QLabel {
-                color: #333;
-                padding: 4px 8px;
-                background: #e8f4fd;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-        """)
-        toolbar.addWidget(self.comparison_view_label)
-        
-        toolbar.addSeparator()
-        
-        # Back button
-        btn = QPushButton("← Back to Data View")
-        btn.clicked.connect(self._back_to_data_view)
-        toolbar.addWidget(btn)
-        
-        # Add slider below the plot
-        self._add_comparison_slider()
-        
-        # Initialize flags and amplitude scale
-        self.comparison_slider_updating = False
-        self.comparison_updating = False
-        self.comparison_amp_scale = 1.0
-        
-        # Connect view change signal
-        try:
-            # Disconnect first to avoid duplicates
-            self.comparison_plot_widget.sigRangeChanged.disconnect()
-        except:
-            pass
-        
-        self.comparison_plot_widget.sigRangeChanged.connect(self._comparison_view_changed)
-        
-        print("✓ _setup_comparison_controls COMPLETE")
-
-    def _add_comparison_slider(self):
-        """Add navigation slider to comparison view - FIXED to place above annotations"""
-        
-        # ==================================================================
-        # FIX: Use the stored layout reference instead of searching
-        # ==================================================================
-        
-        if not hasattr(self, 'comparison_plot_slider_layout'):
-            print("Warning: comparison_plot_slider_layout not found!")
-            return
-        
-        # Remove any existing slider first
-        if hasattr(self, 'comparison_slider_widget') and self.comparison_slider_widget is not None:
-            try:
-                self.comparison_plot_slider_layout.removeWidget(self.comparison_slider_widget)
-                self.comparison_slider_widget.deleteLater()
-            except:
-                pass
-        
-        # Create slider widget
-        from PyQt5.QtWidgets import QSlider
-        self.comparison_slider_widget = QWidget()
-        slider_layout = QHBoxLayout(self.comparison_slider_widget)
-        slider_layout.setContentsMargins(5, 0, 5, 5)
-        
-        self.comparison_slider = QSlider(Qt.Horizontal)
-        self.comparison_slider.setMinimum(0)
-        self.comparison_slider.setMaximum(1000)
-        self.comparison_slider.setValue(0)
-        self.comparison_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 8px;
-                background: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-            }
-            QSlider::handle:horizontal {
-                background: #1f77b4;
-                border: 2px solid #0d5aa7;
-                width: 20px;
-                height: 20px;
-                margin: -6px 0;
-                border-radius: 10px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #2e8bc0;
-            }
-            QSlider::sub-page:horizontal {
-                background: #d0e8ff;
-                border-radius: 4px;
-            }
-        """)
-        self.comparison_slider.setMaximumHeight(30)
-        self.comparison_slider.valueChanged.connect(self._comparison_slider_moved)
-        
-        slider_layout.addWidget(self.comparison_slider)
-        
-        # Add slider to the plot_slider_layout (below plot, above annotations)
-        self.comparison_plot_slider_layout.addWidget(self.comparison_slider_widget)
-        
-        print("✓ Slider added to correct location (below plot, above annotations)")
-
-    def _comparison_slider_moved(self, val):
-        """Handle slider movement"""
-        if self.comparison_slider_updating or not hasattr(self, 'comparison_raw_timestamps'):
-            return
-        
-        xrange = self.comparison_plot_widget.viewRange()[0]
-        width = xrange[1] - xrange[0]
-        
-        time_start = self.comparison_raw_timestamps[0]
-        time_end = self.comparison_raw_timestamps[-1]
-        total_duration = time_end - time_start
-        
-        relative_pos = val / 1000.0
-        center = time_start + relative_pos * total_duration
-        
-        new_start = max(time_start, center - width/2)
-        new_end = min(time_end, center + width/2)
-        
-        if new_start == time_start:
-            new_end = min(time_end, time_start + width)
-        elif new_end == time_end:
-            new_start = max(time_start, time_end - width)
-        
-        self.comparison_plot_widget.sigRangeChanged.disconnect()
-        self.comparison_plot_widget.setXRange(new_start, new_end, padding=0)
-        self.comparison_plot_widget.sigRangeChanged.connect(self._comparison_view_changed)
-        
-        self._update_comparison_view_label()
-
-    def _comparison_view_changed(self):
-        """Update slider when view changes"""
-        if self.comparison_slider_updating or not hasattr(self, 'comparison_raw_timestamps'):
-            return
-        
-        xrange = self.comparison_plot_widget.viewRange()[0]
-        center = (xrange[0] + xrange[1]) / 2
-        
-        time_start = self.comparison_raw_timestamps[0]
-        time_end = self.comparison_raw_timestamps[-1]
-        total_duration = time_end - time_start
-        
-        relative_pos = (center - time_start) / total_duration
-        relative_pos = max(0.0, min(1.0, relative_pos))
-        slider_val = int(relative_pos * 1000)
-        
-        self.comparison_slider_updating = True
-        self.comparison_slider.setValue(slider_val)
-        self.comparison_slider_updating = False
-        
-        self._update_comparison_view_label()
-
-    def _comparison_time_window_changed(self, text):
-        """Apply selected time window"""
-        if not hasattr(self, 'comparison_raw_timestamps'):
-            return
-        
-        time_start = self.comparison_raw_timestamps[0]
-        time_end = self.comparison_raw_timestamps[-1]
-        
-        if text == "Full View":
-            self.comparison_plot_widget.setXRange(time_start, time_end, padding=0.02)
-        else:
-            xrange = self.comparison_plot_widget.viewRange()[0]
-            current_center = (xrange[0] + xrange[1]) / 2
-            
-            # Parse duration
-            if "min" in text:
-                duration = float(text.split()[0]) * 60
-            elif "sec" in text:
-                duration = float(text.split()[0])
-            elif "ms" in text:
-                duration = float(text.split()[0]) / 1000.0
-            else:
-                duration = time_end - time_start
-            
-            new_start = max(time_start, current_center - duration/2)
-            new_end = min(time_end, current_center + duration/2)
-            
-            if new_start == time_start:
-                new_end = min(time_end, time_start + duration)
-            elif new_end == time_end:
-                new_start = max(time_start, time_end - duration)
-            
-            self.comparison_plot_widget.setXRange(new_start, new_end, padding=0)
-        
-        self._update_comparison_view_label()
-
-    def _update_comparison_view_label(self):
-        """Update view info label"""
-        if not hasattr(self, 'comparison_view_label'):
-            return
-        
-        xrange = self.comparison_plot_widget.viewRange()[0]
-        dur = xrange[1] - xrange[0]
-        
-        if dur >= 60:
-            txt = f"View: {dur/60:.1f} min"
-        elif dur >= 1:
-            txt = f"View: {dur:.1f} sec"
-        else:
-            txt = f"View: {dur*1000:.1f} ms"
-        
-        self.comparison_view_label.setText(txt)
-
-    def _comparison_zoom_in(self):
-        print("DEBUG: _comparison_zoom_in called!")
-        
-        # Temporarily disconnect signal
-        self.comparison_plot_widget.sigRangeChanged.disconnect()
-        
-        try:
-            xrange = self.comparison_plot_widget.viewRange()[0]
-            center = (xrange[0] + xrange[1]) / 2
-            width = (xrange[1] - xrange[0]) / 2
-            self.comparison_plot_widget.setXRange(center - width/2, center + width/2, padding=0)
-            self._update_comparison_view_label()
-        finally:
-            # Reconnect signal
-            self.comparison_plot_widget.sigRangeChanged.connect(self._comparison_view_changed)
-
-    def _comparison_zoom_out(self):
-        """Zoom out on comparison view"""
-        xrange = self.comparison_plot_widget.viewRange()[0]
-        center = (xrange[0] + xrange[1]) / 2
-        width = (xrange[1] - xrange[0]) * 2
-        
-        if hasattr(self, 'comparison_raw_timestamps'):
-            max_width = self.comparison_raw_timestamps[-1] - self.comparison_raw_timestamps[0]
-            width = min(width, max_width)
-        
-        self.comparison_plot_widget.setXRange(center - width/2, center + width/2, padding=0)
-
-    def _comparison_reset(self):
-        """Reset comparison view including amplitude"""
-        if self.comparison_updating:
-            return
-            
-        self.comparison_updating = True
-        
-        try:
-            # Reset zoom
-            if hasattr(self, 'comparison_raw_timestamps'):
-                time_start = self.comparison_raw_timestamps[0]
-                time_end = self.comparison_raw_timestamps[-1]
-                
-                self.comparison_plot_widget.sigRangeChanged.disconnect()
-                self.comparison_plot_widget.setXRange(time_start, time_end, padding=0.02)
-                self.comparison_plot_widget.getViewBox().updateAutoRange()
-                self.comparison_plot_widget.sigRangeChanged.connect(self._comparison_view_changed)
-            
-            # Reset amplitude
-            self.comparison_amp_scale = 1.0
-            self._update_comparison_amplitudes()
-            self.comparison_amp_label.setText("Amp: 1.0x")
-            
-            # Reset dropdown
-            if hasattr(self, 'comparison_time_combo'):
-                self.comparison_time_combo.setCurrentText("Full View")
-            
-            self._update_comparison_view_label()
-            
-        finally:
-            self.comparison_updating = False
-
-    def _comparison_amp_increase(self):
-        """Increase amplitude scaling in comparison view"""
-        self.comparison_amp_scale *= 1.2
-        self._update_comparison_amplitudes()
-        self.comparison_amp_label.setText(f"Amp: {self.comparison_amp_scale:.1f}x")
-
-    def _comparison_amp_decrease(self):
-        """Decrease amplitude scaling in comparison view"""
-        self.comparison_amp_scale /= 1.2
-        self._update_comparison_amplitudes()
-        self.comparison_amp_label.setText(f"Amp: {self.comparison_amp_scale:.1f}x")
-
-    def _update_comparison_amplitudes(self):
-        """Update all traces with new amplitude scaling"""
-        if not hasattr(self, 'comparison_raw_curves'):
-            return
-        
-        n_channels = len(self.comparison_raw_normalized)
-        
-        # Update BEFORE traces (top section)
-        for i, (curve, base_data) in enumerate(zip(self.comparison_raw_curves, self.comparison_raw_normalized)):
-            y_offset = (n_channels + 1) * self.comparison_spacing + (n_channels - 1 - i) * self.comparison_spacing
-            scaled_data = base_data * self.comparison_amp_scale + y_offset
-            curve.setData(self.comparison_raw_timestamps, scaled_data)
-        
-        # Update separator
-        separator_y = n_channels * self.comparison_spacing + self.comparison_spacing/2
-        if hasattr(self, 'comparison_separator'):
-            self.comparison_separator.setData(
-                [self.comparison_raw_timestamps[0], self.comparison_raw_timestamps[-1]],
-                [separator_y, separator_y]
-            )
-        
-        # Update AFTER traces (bottom section)
-        for i, (curve, base_data) in enumerate(zip(self.comparison_proc_curves, self.comparison_proc_normalized)):
-            y_offset = (n_channels - 1 - i) * self.comparison_spacing
-            scaled_data = base_data * self.comparison_amp_scale + y_offset
-            curve.setData(self.comparison_proc_timestamps, scaled_data)
-            
-    def _back_to_data_view(self):
-        """Return to main data view"""
-        self.content_stack.setCurrentWidget(self.plot_page)
-        
-        if hasattr(self, 'comparison_toolbar'):
-            self.removeToolBar(self.comparison_toolbar)
-        
-        if hasattr(self, 'plot_manager'):
-            self.plot_data()
-
-    def reset_application_state(self):
-        """Reset application state with proper thread cleanup"""
-        print("Resetting application state...")
-        
-        # CRITICAL: Proper thread cleanup
-        self.cleanup_worker_thread()
-        
-        # Force garbage collection
-        import gc
-        gc.collect()
-        
-        # Clear current data
-        self.current_data = None
-        self.current_header = None
-        self.current_index = -1
-        
-        # Reset UI
-        self.content_stack.setCurrentWidget(self.empty_page)
-        self.clear_info_panel()
-        
-        if hasattr(self, 'plot_widget'):
-            self.plot_widget.clear()
-        
-        self.update_ui_state()
-        print("Reset complete")
-
     def cleanup_worker_thread(self):
         """ROBUST thread cleanup to prevent Qt deletion errors"""
-        print("Cleaning up worker threads...")
-        
+
         # Close progress dialog first
         if hasattr(self, 'progress_dialog') and self.progress_dialog:
             try:
@@ -2518,15 +1066,6 @@ class OpenEphysMainWindow(QMainWindow):
         
         print("Thread cleanup complete")
 
-    def test_preprocess_menu(self):
-        """Test method to verify menu connection works"""
-        print("SUCCESS: Menu item clicked and connected properly!")
-        QMessageBox.information(self, "Menu Test", 
-                            "Edit → Preprocess menu is working!\n\n"
-                            "The menu connection is fine. Check if:\n"
-                            "1. Data is loaded\n"
-                            "2. Menu item is enabled\n"
-                            "3. dialogs.py is in the correct location")
 def main():
     """Main application entry point"""
     app = QApplication(sys.argv)
@@ -2542,7 +1081,6 @@ def main():
     print("Workflow: File → Open → Choose downsample rate → Edit → Preprocess → Comparison view")
     
     sys.exit(app.exec_())
-
 
 if __name__ == '__main__':
     main()
