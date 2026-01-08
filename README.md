@@ -29,7 +29,8 @@ Built for researchers who want to quickly load, preprocess, and analyze multi-ch
 
 Load single or multiple channels, choose target frequency, and preprocess your data.
 
-https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/First%20step.mov
+https://github.com/user-attachments/assets/b6a9aec0-d42d-4373-8309-3cfdc1d5073c
+
 
 ---
 
@@ -37,7 +38,6 @@ https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/First%20step.mov
 
 Zoom in/out, adjust amplitude, resize panels, and select time windows.
 
-https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/Control%20bar.mov
 
 ---
 
@@ -45,7 +45,6 @@ https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/Control%20bar.mo
 
 Load sleep scoring from .mat files and overlay on your neural data.
 
-https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/Load%20sleep%20scoring.mov
 
 ---
 
@@ -53,7 +52,6 @@ https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/Load%20sleep%20s
 
 Mark events manually using left-click drag, then export to CSV.
 
-https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/Annotation.mov
 
 ---
 
