@@ -303,6 +303,10 @@ class OpenEphysMainWindow(QMainWindow, comparison_view, SleepScoringMixin, DataL
         self.actionOpenMulti = file_menu.addAction('Load &Multiple Channels...')
         self.actionOpenMulti.setShortcut('Ctrl+Shift+O')
         self.actionOpenMulti.triggered.connect(self.load_multiple_channels)
+
+        self.actionOpenMat = file_menu.addAction('Load &Preprocessed Data (.mat)...')
+        self.actionOpenMat.setShortcut('Ctrl+Shift+M')
+        self.actionOpenMat.triggered.connect(self.load_preprocessed_mat)
         
         file_menu.addSeparator()
         

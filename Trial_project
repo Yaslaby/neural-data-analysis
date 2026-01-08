@@ -1,0 +1,348 @@
+import sys
+import os
+from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QVBoxLayout, QMessageBox, QWidget
+import pyqtgraph as pg
+from GUI_file import Ui_MainWindow
+import numpy as np
+import traceback
+from PlotManager import PlotManager
+from MultiChannelLoader import MultiChannelLoader, load_single_channel
+from annotation import AnnotationManager, AnnotationWidget, add_right_click_annotation, AnnotationControls
+
+
+
+def readHeader(f):
+    """Read header information from the first 1024 bytes of an OpenEphys file."""
+    header = {}
+    
+    # Read and process header data from open Ephys file
+    header_string = f.read(1024).decode('utf-8').replace('\n', '').replace('header.', '')
+    
+    # Parse each key = value string separately
+    for pair in header_string.split(';'):
+        if '=' in pair:
+            key, value = pair.split(' = ')
+            key = key.strip()
+            value = value.strip()
+            
+            # Convert some values to numeric
+            if key in ['bitVolts', 'sampleRate']:
+                header[key] = float(value)
+            elif key in ['blockLength', 'bufferSize', 'header_bytes']:
+                header[key] = int(value)
+            else:
+                # Keep as string
+                header[key] = value
+    
+    return header
+
+def loadContinuous(filepath, dtype=float, verbose=True):
+    """Load continuous data from a single Open Ephys channel file."""
+    if verbose:
+        print("Loading continuous data from " + filepath)
+    
+    # Record marker specification
+    spec_record_marker = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 255])
+    
+    # Lists for data that's read
+    timestamps = []
+    samples = []
+    
+    # Open the file
+    with open(filepath, 'rb') as f:
+        # Read header info
+        header = readHeader(f)
+        record_length_bytes = 2 * header['blockLength'] + 22
+        fileLength = os.fstat(f.fileno()).st_size
+        
+        # Keep reading till the file is finished
+        while f.tell() < fileLength:
+            # Skip the last record if it's incomplete
+            if f.tell() == (fileLength - record_length_bytes):
+                break
+            
+            # Read timestamp (8 bytes, little-endian signed integer)
+            timestamp_data = np.fromfile(f, np.dtype('<i8'), 1)
+            if len(timestamp_data) == 0:
+                break
+            timestamps.append(timestamp_data[0])
+            
+            # Read number of samples (2 bytes, little-endian unsigned integer)
+            N = np.fromfile(f, np.dtype('<u2'), 1)
+            if len(N) == 0:
+                break
+            N = N[0]
+            
+            if N != header['blockLength']:
+                print(f"Warning: Found corrupted record, expected {header['blockLength']} samples, got {N}")
+                break
+            
+            # Read recording number (2 bytes, big-endian unsigned integer)
+            recordingNumber = np.fromfile(f, np.dtype('>u2'), 1)
+            if len(recordingNumber) == 0:
+                break
+            
+            # Read the actual data (N samples, 2 bytes each, big-endian signed integer)
+            data = np.fromfile(f, np.dtype('>i2'), N)
+            if len(data) != N:
+                print(f"Warning: Could not read expected number of samples")
+                break
+            
+            # Convert to microvolts if requested
+            if dtype == float:
+                data = data.astype(float) * header['bitVolts']
+            
+            samples.append(data)
+            
+            # Read and verify record marker (10 bytes)
+            record_marker = np.fromfile(f, np.dtype('<u1'), 10)
+            if len(record_marker) != 10 or np.any(record_marker != spec_record_marker):
+                print("Warning: Corrupted record marker detected")
+                # Continue anyway, don't break
+    
+    # Prepare results
+    result = {'header': header}
+    if len(samples) > 0:
+        result['timestamps'] = np.array(timestamps)
+        result['data'] = np.concatenate(samples)
+    else:
+        result['timestamps'] = np.array([], dtype=np.int64)
+        result['data'] = np.array([], dtype=dtype)
+    
+    return result
+
+class OpenEphysMainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.ui = Ui_MainWindow()
+        self.ui.setupUi(self)
+        
+        # Create the plot widget
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setLabel('left', 'Amplitude', units='µV')
+        self.plot_widget.setLabel('bottom', 'Time', units='s')
+        self.plot_widget.setBackground('w')
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.setUnifiedTitleAndToolBarOnMac(False)  # For Mac users
+        self.setMinimumSize(800, 600)
+
+        # Initialize annotation system
+        self.annotation_manager = AnnotationManager()
+        self.current_time = 0.0  # Track current time for annotations
+        
+        # Add right-click annotation to plot
+        add_right_click_annotation(self.plot_widget, self.annotation_manager)
+        
+        # Create annotation panel
+        annotation_panel = QWidget()
+        annotation_layout = QVBoxLayout(annotation_panel)
+        
+        # Add controls
+        controls = AnnotationControls(self.annotation_manager, self)
+        annotation_layout.addLayout(controls)
+        
+        # Add event list
+        self.annotation_widget = AnnotationWidget(self.annotation_manager)
+        annotation_layout.addWidget(self.annotation_widget)
+    
+        # Set up layout
+        if not self.ui.plotArea.layout():
+            layout = QVBoxLayout(self.ui.plotArea)
+        else:
+            layout = self.ui.plotArea.layout()
+        layout.addWidget(self.plot_widget)
+        layout.addWidget(annotation_panel)
+    
+        # Initialize plot manager for zoom functionality
+        self.plot_manager = PlotManager(self)
+
+        # Multichannel loader for handling multiple channels
+        self.multichannel_loader = MultiChannelLoader(self)
+
+        # Connect file open action
+        self.ui.actionOpen.triggered.connect(self.load_data)
+        # Connect multichannel loader action
+        self.add_multichannel_menu()
+        
+        self.current_data = None
+        self.current_header = None
+        self.filtered_data = None
+        self.selected_channels = []
+
+    def add_multichannel_menu(self):
+        """Add multi-channel loading option to File menu"""
+        from PyQt5.QtWidgets import QAction
+        
+        multichannel_action = QAction("Load Multiple Channels", self)
+        multichannel_action.setShortcut("Ctrl+Shift+O")
+        multichannel_action.setStatusTip("Load multiple .continuous files as separate channels")
+        # ADD THIS: Connect to the multi-channel loader
+        multichannel_action.triggered.connect(
+            lambda: self.multichannel_loader.select_and_load_files(self.on_multichannel_loaded)
+        )
+        
+        # Add to File menu
+        self.ui.menufile.addAction(multichannel_action)
+    def load_ui(self):
+    """Load UI from .ui file or create programmatically"""
+    try:
+        # Try to load from UI file
+        ui_file = Path(__file__).parent / "ui" / "mainwindow.ui"
+        if ui_file.exists():
+            uic.loadUi(str(ui_file), self)
+            print("Loaded UI from file")
+        else:
+            raise FileNotFoundError("UI file not found")
+    except:
+        # Create UI programmatically if file not found
+        print("Creating UI programmatically...")
+        self.create_ui_programmatically()
+
+    def create_ui_programmatically(self):
+    # Create UI when .ui file is not available
+    # Create central widget and basic layout
+    central_widget = QWidget()
+    self.setCentralWidget(central_widget)
+    main_layout = QHBoxLayout(central_widget)
+    
+    # Create plot area
+    self.plotArea = QWidget()
+    self.plotArea.setMinimumSize(800, 600)
+    main_layout.addWidget(self.plotArea)
+    
+    # Create menu bar
+    self.create_menus()
+
+    def connect_signals(self):
+    #Connect UI signals to methods
+    # Original connections
+    self.actionOpen.triggered.connect(self.load_single_file)  # Renamed method
+    
+    #Additional connections
+    if hasattr(self, 'actionOpenMulti'):
+        self.actionOpenMulti.triggered.connect(self.load_multiple_channels)
+    if hasattr(self, 'actionFilter'):
+        self.actionFilter.triggered.connect(self.filter_data)
+    if hasattr(self, 'actionChannelSelect'):
+        self.actionChannelSelect.triggered.connect(self.select_channels)
+    if hasattr(self, 'actionRippleDetection'):
+        self.actionRippleDetection.triggered.connect(self.detect_ripples)
+    
+    def load_data(self):
+        """Original single file loading"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Select .continuous file',
+            filter="Continuous files (*.continuous)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            # Check if it's a continuous file
+            if 'continuous' not in file_path:
+                print(f"Error: {file_path} is not a .continuous file")
+                QMessageBox.warning(self, "Invalid File", "Please select a .continuous file")
+                return
+            
+            # Use the Open Ephys loader
+            result = loadContinuous(file_path, dtype=float, verbose=True)
+            data = result['data']
+            timestamps = result['timestamps']
+            header = result['header']
+            
+            print(f"\nLoaded {len(data)} samples")
+            print(f"Sample rate: {header.get('sampleRate', 'Unknown')} Hz")
+            print(f"Bit volts: {header.get('bitVolts', 'Unknown')} µV/bit")
+            
+            if len(data) == 0:
+                print("No data found in file")
+                return
+            
+            self.plot_manager.plot_data(data, timestamps, header, file_path)
+            
+        except Exception as e:
+            print("Error loading file:", str(e))
+            traceback.print_exc()
+
+    # Callback for when multi-channel loading is complete
+    def on_multichannel_loaded(self, data, timestamps, header, description):
+        """Called when multi-channel loading is complete"""
+        try:
+            print(f"\nMulti-channel data loaded successfully!")
+            print(f"Shape: {data.shape}")
+            print(f"Channels: {header.get('channel_count', 'Unknown')}")
+            print(f"Sample rate: {header.get('sampleRate', 'Unknown')} Hz")
+            
+            # Plot the multi-channel data
+            self.plot_manager.plot_data(data, timestamps, header, description)
+            
+        except Exception as e:
+            print("Error plotting multi-channel data:", str(e))
+            traceback.print_exc()
+            QMessageBox.critical(
+                self,
+                "Plot Error", 
+                f"Failed to plot multi-channel data:\n{str(e)}"
+            )
+    def create_menus(self):
+        menubar = self.menuBar()
+    
+        # File menu
+        self.menufile = menubar.addMenu('File')
+    
+        self.actionOpen = self.menufile.addAction('Open Single Channel...')
+        self.actionOpen.setShortcut('Ctrl+O')
+    
+     # Multi-channel loading
+    def on_multichannel_loaded(self, data, timestamps, header, description):
+    try:
+        # Store data properly
+        self.current_data = data
+        self.current_header = header
+        self.selected_channels = list(range(min(8, data.shape[1])))
+        
+        # Original plotting code...
+        self.plot_manager.plot_data(data, timestamps, header, description)
+        
+        # Update UI state
+        self.update_ui_state()
+        
+    except Exception as e:
+    # Export and Exit options
+    self.actionExport = self.menufile.addAction('Export Data...')
+    self.actionExit = self.menufile.addAction('Exit')
+    
+    # Edit menu
+    edit_menu = menubar.addMenu('Edit')
+    self.actionFilter = edit_menu.addAction('Filter Data...')
+    self.actionChannelSelect = edit_menu.addAction('Select Channels...')
+    
+    # Analysis menu
+    analysis_menu = menubar.addMenu('Analysis')
+    self.actionRippleDetection = analysis_menu.addAction('Detect Ripples...')
+    self.actionERDS = analysis_menu.addAction('ERDS Analysis...')
+    
+    #View menu
+    view_menu = menubar.addMenu('View')
+    self.actionResetZoom = view_menu.addAction('Reset Zoom')
+    self.actionResetZoom.setShortcut('Ctrl+0')
+
+def main():
+    app = QApplication(sys.argv)
+    
+    # Set application properties
+    app.setApplicationName("OpenEphysLab")
+    app.setApplicationVersion("1.0")
+    app.setOrganizationName("Neural Data Analysis")
+    
+    # Modified class name:
+    window = OpenEphysMainWindow() 
+    window.show()
+    
+    # startup message
+    print("Neural Data Analysis started successfully!")
+    print("Load .continuous files using File → Open or File → Load Multiple Channels")
+    
+    sys.exit(app.exec_())

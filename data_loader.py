@@ -5,9 +5,10 @@ Handles file loading, downsampling, and multi-channel data operations
 import os
 import traceback
 import numpy as np
+from scipy.io import loadmat
 
 from PyQt5.QtWidgets import (
-    QApplication, QFileDialog, QDialog, QProgressDialog, QMessageBox
+    QApplication, QFileDialog, QDialog, QProgressDialog, QMessageBox,QInputDialog
 )
 from PyQt5.QtCore import Qt, QThread
 
@@ -44,7 +45,93 @@ class DataLoader:
         except Exception as e:
             QMessageBox.critical(self, "Load Error", f"Failed to load file:\n{str(e)}")
             traceback.print_exc()
-
+    def load_preprocessed_mat(self):
+        """Load preprocessed data from .mat file"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 'Select preprocessed .mat file',
+            filter="MATLAB Files (*.mat)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            mat = loadmat(file_path)
+            
+            # Find the data array
+            data = None
+            fs = None
+            
+            # Check common variable names
+            for name in ['data', 'signal', 'lfp', 'LFP', 'eeg', 'preprocessed']:
+                if name in mat:
+                    data = mat[name].squeeze()
+                    break
+            
+            for name in ['fs', 'Fs', 'sampleRate', 'sample_rate', 'sr']:
+                if name in mat:
+                    fs = float(mat[name].squeeze())
+                    break
+            
+            # If not found, grab the largest array
+            if data is None:
+                for key, val in mat.items():
+                    if not key.startswith('_') and isinstance(val, np.ndarray) and val.size > 1000:
+                        data = val.squeeze()
+                        break
+            
+            if data is None:
+                available = [k for k in mat.keys() if not k.startswith('_')]
+                QMessageBox.warning(self, "Data Not Found",
+                    f"Could not find signal data.\nAvailable variables: {', '.join(available)}")
+                return
+            
+            # Ask for sampling rate if not found
+            if fs is None:
+                fs, ok = QInputDialog.getDouble(self, "Sampling Rate",
+                    "Enter sampling rate (Hz):", 1000, 1, 100000, 0)
+                if not ok:
+                    return
+            
+            # Ensure shape is (samples, channels)
+            if data.ndim == 1:
+                data = data.reshape(-1, 1)
+            elif data.shape[0] < data.shape[1]:
+                data = data.T
+            
+            timestamps = np.arange(len(data)) / fs
+            
+            header = {
+                'sampleRate': fs,
+                'preprocessed': True,  # This flag skips downsampling & notch
+                'channel_count': data.shape[1],
+                'channel_files': [f"CH{i+1}" for i in range(data.shape[1])]
+            }
+            
+            name = os.path.basename(file_path).replace('.mat', '') + ' (preprocessed)'
+            
+            dataset = {
+                "name": name,
+                "data": data.astype(np.float64),
+                "header": header,
+                "file_path": file_path,
+                "timestamps": timestamps
+            }
+            
+            self.add_dataset(dataset)
+            
+            QMessageBox.information(self, "Loaded",
+                f"Preprocessed data loaded!\n\n"
+                f"Channels: {data.shape[1]}\n"
+                f"Samples: {len(data):,}\n"
+                f"Rate: {fs:.0f} Hz\n"
+                f"Duration: {timestamps[-1]:.1f}s\n\n"
+                f"Notch filter will be skipped.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load:\n{str(e)}")
+            traceback.print_exc()
+            
     def show_downsample_dialog(self, data, header, timestamps, file_path):
         """Show downsample dialog and handle downsampling"""
         dialog = DownsampleDialog(data, header, timestamps, file_path, self)

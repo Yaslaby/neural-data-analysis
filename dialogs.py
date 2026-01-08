@@ -21,6 +21,7 @@ class PreprocessingDialog(QDialog):
         self.header = header
         self.timestamps = timestamps
         self.original_fs = header.get('sampleRate')
+        self.is_preprocessed = header.get('preprocessed', False)
         
         if self.original_fs is None or self.original_fs <= 0:
             QMessageBox.critical(self, "Invalid File", 
@@ -105,27 +106,47 @@ class PreprocessingDialog(QDialog):
         group = QGroupBox("Filters")
         group_layout = QGridLayout(group)
         
-        self.enable_notch = QCheckBox("50Hz Notch filter")
-        self.enable_notch.setChecked(True)
-        group_layout.addWidget(self.enable_notch, 0, 0, 1, 2)
+        row = 0
         
+        # Show notice if preprocessed
+        if self.is_preprocessed:
+            notice = QLabel("Preprocessed data - notch filter disabled")
+            notice.setStyleSheet("color: #0078d4; font-weight: bold; padding: 5px;")
+            group_layout.addWidget(notice, row, 0, 1, 2)
+            row += 1
+        
+        # Notch filter - disabled for preprocessed data
+        self.enable_notch = QCheckBox("50Hz Notch filter")
+        if self.is_preprocessed:
+            self.enable_notch.setChecked(False)
+            self.enable_notch.setEnabled(False)
+        else:
+            self.enable_notch.setChecked(True)
+        group_layout.addWidget(self.enable_notch, row, 0, 1, 2)
+        row += 1
+        
+        # Bandpass filter
         self.enable_bandpass = QCheckBox("Bandpass filter")
         self.enable_bandpass.setChecked(True)
-        group_layout.addWidget(self.enable_bandpass, 1, 0, 1, 2)
+        group_layout.addWidget(self.enable_bandpass, row, 0, 1, 2)
+        row += 1
         
-        group_layout.addWidget(QLabel("Low cutoff (Hz):"), 2, 0)
+        # Frequency settings
+        group_layout.addWidget(QLabel("Low cutoff (Hz):"), row, 0)
         self.low_cutoff = QDoubleSpinBox()
         self.low_cutoff.setRange(0.1, 500.0)
         self.low_cutoff.setValue(80.0)
         self.low_cutoff.setSingleStep(10.0)
-        group_layout.addWidget(self.low_cutoff, 2, 1)
+        group_layout.addWidget(self.low_cutoff, row, 1)
+        row += 1
         
-        group_layout.addWidget(QLabel("High cutoff (Hz):"), 3, 0)
+        group_layout.addWidget(QLabel("High cutoff (Hz):"), row, 0)
         self.high_cutoff = QDoubleSpinBox()
         self.high_cutoff.setRange(1.0, 1000.0)
         self.high_cutoff.setValue(250.0)
         self.high_cutoff.setSingleStep(10.0)
-        group_layout.addWidget(self.high_cutoff, 3, 1)
+        group_layout.addWidget(self.high_cutoff, row, 1)
+        row += 1
         
         # Presets
         preset_layout = QHBoxLayout()
@@ -137,9 +158,9 @@ class PreprocessingDialog(QDialog):
         gamma_btn.clicked.connect(lambda: self.set_preset(30, 100))
         preset_layout.addWidget(gamma_btn)
         
-        group_layout.addLayout(preset_layout, 4, 0, 1, 2)
+        group_layout.addLayout(preset_layout, row, 0, 1, 2)
         layout.addWidget(group)
-    
+
     def setup_summary(self, layout):
         """Setup summary display"""
         group = QGroupBox("Processing Summary")
