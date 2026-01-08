@@ -29,7 +29,8 @@ Built for researchers who want to quickly load, preprocess, and analyze multi-ch
 
 Load single or multiple channels, choose target frequency, and preprocess your data.
 
-https://github.com/Yaslaby/neural-data-analysis/raw/main/videos/First%20step.mp4
+https://github.com/user-attachments/assets/b6a9aec0-d42d-4373-8309-3cfdc1d5073c
+
 
 ---
 
