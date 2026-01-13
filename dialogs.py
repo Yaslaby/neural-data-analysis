@@ -135,7 +135,7 @@ class PreprocessingDialog(QDialog):
         group_layout.addWidget(QLabel("Low cutoff (Hz):"), row, 0)
         self.low_cutoff = QDoubleSpinBox()
         self.low_cutoff.setRange(0.1, 500.0)
-        self.low_cutoff.setValue(80.0)
+        self.low_cutoff.setValue(100.0)
         self.low_cutoff.setSingleStep(10.0)
         group_layout.addWidget(self.low_cutoff, row, 1)
         row += 1
@@ -150,8 +150,8 @@ class PreprocessingDialog(QDialog):
         
         # Presets
         preset_layout = QHBoxLayout()
-        ripple_btn = QPushButton("Ripples (80-250Hz)")
-        ripple_btn.clicked.connect(lambda: self.set_preset(80, 250))
+        ripple_btn = QPushButton("Ripples (100-250Hz)")
+        ripple_btn.clicked.connect(lambda: self.set_preset(100, 250))
         preset_layout.addWidget(ripple_btn)
         
         gamma_btn = QPushButton("Gamma (30-100Hz)")
@@ -466,7 +466,7 @@ class DownsampleDialog(QDialog):
             preview_text += f"Nyquist: {nyquist_new:.0f}Hz\n"
             
             if target_fs >= 2000:
-                preview_text += "Suitable for ripples (80-250Hz)"
+                preview_text += "Suitable for ripples (100-250Hz)"
             elif target_fs >= 1000:
                 preview_text += "Good for ripples, may limit high-gamma"
             else:
