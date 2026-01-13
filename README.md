@@ -51,7 +51,10 @@ https://github.com/user-attachments/assets/802796f4-d6f3-43fa-b93f-3173b587369d
 Mark ripple events using left-click drag, categorize by type (ripple/spindle/delta), and export annotations to CSV.
 
 
-https://github.com/user-attachments/assets/efdb2ebf-7953-48d0-8a85-799cc1c6ec1c
+
+https://github.com/user-attachments/assets/1c06924f-f33a-44a4-b24d-d5bf81ba412c
+
+
 
 
 
