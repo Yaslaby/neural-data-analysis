@@ -25,32 +25,34 @@ Built for researchers who want to quickly load, preprocess, and analyze multi-ch
 
 ## Demo Videos
 
-### 1. Loading Data & Preprocessing
+### 1. Loading Data & Sleep Scoring File
 
-Load single or multiple channels, choose target frequency, and preprocess your data.
-
-https://github.com/user-attachments/assets/b6a9aec0-d42d-4373-8309-3cfdc1d5073c
+Load single or multiple `.continuous` channels, select target downsample frequency, import sleep scoring from `.mat` files, or upload preprocessed `.mat` files directly.
 
 
----
 
-### 2. Navigation & Controls
+https://github.com/user-attachments/assets/be8922ff-ac99-4995-ba7a-e3a47d76e36e
 
-Zoom in/out, adjust amplitude, resize panels, and select time windows.
 
 
 ---
 
-### 3. Sleep Scoring Integration
+### 2. Preprocess Data/ Navigation & Controls
 
-Load sleep scoring from .mat files and overlay on your neural data.
+Apply bandpass filtering (100-250Hz), zoom in/out, adjust amplitude, resize panels, and navigate using time window presets.
 
+
+https://github.com/user-attachments/assets/802796f4-d6f3-43fa-b93f-3173b587369d
 
 ---
 
-### 4. Annotation System
+### 3. Annotation System
 
-Mark events manually using left-click drag, then export to CSV.
+Mark ripple events using left-click drag, categorize by type (ripple/spindle/delta), and export annotations to CSV.
+
+
+https://github.com/user-attachments/assets/efdb2ebf-7953-48d0-8a85-799cc1c6ec1c
+
 
 
 ---
