@@ -185,11 +185,16 @@ class PreprocessingWorker(QObject):
                 raw = raw.copy().resample(target_fs, verbose=False)
             
             if self.params['notch_enabled']:
-                raw._data[0] = notch_filter(
-                    raw._data[0], target_fs, freqs=[50],
-                    method='fir', phase='zero', verbose=False
-                )
-            
+                notch_freqs = self.params.get('notch_frequencies', [50])
+                # Filter out frequencies above Nyquist
+                valid_freqs = [f for f in notch_freqs if f < target_fs / 2]
+                
+                if valid_freqs:
+                    raw._data[0] = notch_filter(
+                        raw._data[0], target_fs, freqs=valid_freqs,
+                        method='fir', phase='zero', verbose=False
+                    )
+
             if self.params['bandpass_enabled']:
                 raw = raw.copy().filter(
                     l_freq=self.params['low_cutoff'],

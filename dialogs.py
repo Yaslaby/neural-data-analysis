@@ -115,15 +115,32 @@ class PreprocessingDialog(QDialog):
             group_layout.addWidget(notice, row, 0, 1, 2)
             row += 1
         
-        # Notch filter - disabled for preprocessed data
-        self.enable_notch = QCheckBox("50Hz Notch filter")
-        if self.is_preprocessed:
-            self.enable_notch.setChecked(False)
-            self.enable_notch.setEnabled(False)
-        else:
-            self.enable_notch.setChecked(True)
-        group_layout.addWidget(self.enable_notch, row, 0, 1, 2)
+        # Notch filter with checkbox list
+        notch_label = QLabel("Notch filter (select frequencies to remove):")
+        group_layout.addWidget(notch_label, row, 0, 1, 4)
         row += 1
+        
+        # Create checkboxes for common frequencies
+        self.notch_checkboxes = {}
+        notch_frequencies = [50, 60, 100, 150, 200, 250]
+        
+        col = 0
+        for freq in notch_frequencies:
+            cb = QCheckBox(f"{freq} Hz")
+            if self.is_preprocessed:
+                cb.setChecked(False)
+                cb.setEnabled(False)
+            else:
+                cb.setChecked(freq == 50)  # Default: only 50 Hz checked
+            self.notch_checkboxes[freq] = cb
+            group_layout.addWidget(cb, row, col)
+            col += 1
+            if col > 2:  # 3 per row
+                col = 0
+                row += 1
+        
+        if col != 0:  # Move to next row if not already
+            row += 1
         
         # Bandpass filter
         self.enable_bandpass = QCheckBox("Bandpass filter")
@@ -176,9 +193,12 @@ class PreprocessingDialog(QDialog):
         """Connect UI signals"""
         self.channel_list.itemSelectionChanged.connect(self.update_summary)
         self.enable_bandpass.toggled.connect(self.update_summary)
-        self.enable_notch.toggled.connect(self.update_summary)
         self.low_cutoff.valueChanged.connect(self.update_summary)
         self.high_cutoff.valueChanged.connect(self.update_summary)
+        
+        # Connect notch checkboxes
+        for checkbox in self.notch_checkboxes.values():
+            checkbox.toggled.connect(self.update_summary)
     
     def select_all_channels(self):
         for i in range(self.channel_list.count()):
@@ -204,8 +224,13 @@ class PreprocessingDialog(QDialog):
         summary.append(f"No resampling ({self.original_fs:.0f}Hz)")
         
         filters = []
-        if self.enable_notch.isChecked():
-            filters.append("50Hz notch")
+        
+        # Collect selected notch frequencies
+        selected_notch = [freq for freq, cb in self.notch_checkboxes.items() if cb.isChecked()]
+        if selected_notch:
+            freq_str = ", ".join([f"{f}" for f in sorted(selected_notch)])
+            filters.append(f"Notch: {freq_str} Hz")
+        
         if self.enable_bandpass.isChecked():
             filters.append(f"{self.low_cutoff.value():.0f}-{self.high_cutoff.value():.0f}Hz bandpass")
         
@@ -225,10 +250,18 @@ class PreprocessingDialog(QDialog):
     
     def get_parameters(self):
         """Get processing parameters"""
+        # Collect checked notch frequencies (validate against Nyquist)
+        target_fs = self.original_fs
+        notch_freqs = []
+        for freq, checkbox in self.notch_checkboxes.items():
+            if checkbox.isChecked() and freq < target_fs / 2:
+                notch_freqs.append(freq)
+        
         return {
             'channels': self.get_selected_channels(),
-            'target_fs': self.original_fs,
-            'notch_enabled': self.enable_notch.isChecked(),
+            'target_fs': target_fs,
+            'notch_enabled': len(notch_freqs) > 0,
+            'notch_frequencies': sorted(notch_freqs),
             'bandpass_enabled': self.enable_bandpass.isChecked(),
             'low_cutoff': self.low_cutoff.value(),
             'high_cutoff': self.high_cutoff.value(),

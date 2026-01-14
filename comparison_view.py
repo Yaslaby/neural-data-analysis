@@ -179,6 +179,8 @@ class comparison_view:
             )
             
             # Plot AFTER (bottom) - store curves
+            self.comparison_proc_threshold_lines = []
+            self.comparison_proc_threshold_base = []
             for i in range(n_channels):
                 y_offset = (n_channels - 1 - i) * self.comparison_spacing
                 
@@ -199,19 +201,19 @@ class comparison_view:
                 )
                 self.comparison_proc_curves.append(curve)
                 
-                # ★ ADD THRESHOLD LINE FOR AFTER (processed) using Karlsson method ★
+                # ADD THRESHOLD LINE FOR AFTER (processed)
                 if proc_thresholds and i < len(proc_thresholds):
                     threshold_value = proc_thresholds[i]
                     
-                    # Calculate envelope for proper scaling
                     from scipy.signal import hilbert
                     envelope = np.abs(hilbert(ch_data))
                     envelope_ptp = np.ptp(envelope)
                     
                     if envelope_ptp > 0:
-                        threshold_normalized = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8 + y_offset
+                        # Store base threshold (without offset) for amplitude scaling
+                        threshold_base = (threshold_value / envelope_ptp) * self.comparison_spacing * 0.8
+                        threshold_normalized = threshold_base + y_offset
                         
-                        # Plot threshold as red dashed line
                         pen_thresh = pg.mkPen(color='red', width=1, style=Qt.SolidLine)
                         thresh_line = self.comparison_plot_widget.plot(
                             [proc_timestamps[0], proc_timestamps[-1]], 
@@ -219,7 +221,10 @@ class comparison_view:
                             pen=pen_thresh
                         )
                         
-                        # Add threshold label
+                        # Store for amplitude updates
+                        self.comparison_proc_threshold_lines.append(thresh_line)
+                        self.comparison_proc_threshold_base.append(threshold_base)
+                        
                         text_label = pg.TextItem(
                             text=f"Thresh (3σ): {threshold_value:.2f}",
                             color=(255, 0, 0),
@@ -703,6 +708,15 @@ class comparison_view:
             y_offset = (n_channels - 1 - i) * self.comparison_spacing
             scaled_data = base_data * self.comparison_amp_scale + y_offset
             curve.setData(self.comparison_proc_timestamps, scaled_data)
+        # Update threshold lines with same amplitude scale
+        if hasattr(self, 'comparison_proc_threshold_lines') and hasattr(self, 'comparison_proc_threshold_base'):
+            for i, (thresh_line, thresh_base) in enumerate(zip(self.comparison_proc_threshold_lines, self.comparison_proc_threshold_base)):
+                y_offset = (n_channels - 1 - i) * self.comparison_spacing
+                scaled_threshold = thresh_base * self.comparison_amp_scale + y_offset
+                thresh_line.setData(
+                    [self.comparison_proc_timestamps[0], self.comparison_proc_timestamps[-1]],
+                    [scaled_threshold, scaled_threshold]
+                )    
 
     def _back_to_data_view(self):
         """Return to main data view"""
