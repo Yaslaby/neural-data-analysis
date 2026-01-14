@@ -122,7 +122,7 @@ class PreprocessingDialog(QDialog):
         
         # Create checkboxes for common frequencies
         self.notch_checkboxes = {}
-        notch_frequencies = [50, 60, 100, 150, 200, 250]
+        notch_frequencies = [50,100, 150, 200, 250]
         
         col = 0
         for freq in notch_frequencies:

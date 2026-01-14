@@ -226,7 +226,7 @@ class comparison_view:
                         self.comparison_proc_threshold_base.append(threshold_base)
                         
                         text_label = pg.TextItem(
-                            text=f"Thresh (3σ): {threshold_value:.2f}",
+                            text=f"Thresh (2.5σ): {threshold_value:.2f}",
                             color=(255, 0, 0),
                             anchor=(0, 0.5),
                             fill=(255, 255, 255, 200)

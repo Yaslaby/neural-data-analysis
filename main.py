@@ -657,7 +657,7 @@ class OpenEphysMainWindow(QMainWindow, comparison_view, SleepScoringMixin, DataL
             for i in range(raw_data.shape[1]):
                 ch_data = raw_data[:, i]
                 envelope = np.abs(hilbert(ch_data))
-                threshold_value = np.mean(envelope) + 3.0 * np.std(envelope)
+                threshold_value = np.mean(envelope) + 2.5 * np.std(envelope)
                 raw_thresholds.append(threshold_value)
                 print(f"Raw Channel {i}: Threshold = {threshold_value:.6f}")
             
@@ -702,7 +702,7 @@ class OpenEphysMainWindow(QMainWindow, comparison_view, SleepScoringMixin, DataL
             QMessageBox.information(self, "Preprocessing Complete", 
                                 f"Processing successful!\n\n"
                                 f"View shows before vs after preprocessing\n"
-                                f"Red dashed lines = ripple detection threshold (3σ)")
+                                f"Red dashed lines = ripple detection threshold (2.5σ)")
             
         except Exception as e:
             print(f"ERROR in preprocessing complete: {str(e)}")
